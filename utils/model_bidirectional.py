@@ -1,0 +1,63 @@
+# bidirectional causal masking model
+import torch
+from .model_base import BaseModel, init_weights
+
+class BidirectionalCausalLM(BaseModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.transformer = BaseModel(config)
+        self.lm_head = torch.nn.Linear(config.n_embd, config.vocab_size)
+
+        # throw out old LM head, make new one for multiple targets per pos
+        # TODO: remove old lm_head if possible without breaking anything
+        in_f = self.lm_head.in_features
+        out_f = self.lm_head.out_features * 2
+        self.multi_lm_head = torch.nn.Linear(in_f, out_f)
+
+        init_weights(self.multi_lm_head, config)
+
+    def forward(
+        self,
+        input_ids=None,
+        past_key_values=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        pos_offsets=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
+            ``labels = input_ids`` Indices are selected in ``[-100, 0, ..., config.vocab_size]`` All labels set to
+            ``-100`` are ignored (masked), the loss is only computed for labels in ``[0, ..., config.vocab_size]``
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        transformer_outputs = self.transformer(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            pos_offsets=pos_offsets,
+        )
+        hidden_states = transformer_outputs[0]
+
+        # make sure sampling in fp16 works correctly and
+        # compute loss in fp32 to match with mesh-tf version
+        # https://github.com/EleutherAI/gpt-neo/blob/89ce74164da2fb16179106f54e2269b5da8db333/models/gpt2/gpt2.py#L179
+        lm_logits = self.multi_lm_head(hidden_states).to(torch.float32)
+
+        return lm_logits
