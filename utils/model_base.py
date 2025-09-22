@@ -69,8 +69,8 @@ class AttentionBlock(torch.nn.Module):
         if config.rotary_dim is not None:
             self.rotary_dim = config.rotary_dim
 
-        init_weights(self.qkv_proj)
-        init_weights(self.out_proj)
+        init_weights(self.qkv_proj, config)
+        init_weights(self.out_proj, config)
 
     def _split_heads(self, x, n_head, dim_head, mp_num):
         reshaped = x.reshape(x.shape[:-1] + (n_head//mp_num, dim_head))
@@ -213,8 +213,8 @@ class MLP(torch.nn.Module):
         self.act = SwiGLU()
         self.dropout = torch.nn.Dropout(config.resid_pdrop)
 
-        init_weights(self.fc_in)
-        init_weights(self.fc_out)
+        init_weights(self.fc_in, config)
+        init_weights(self.fc_out, config)
 
     def forward(self, hidden_states):
         hidden_states = self.fc_in(hidden_states)
@@ -232,7 +232,7 @@ class DecoderBlock(torch.nn.Module):
         self.attn = AttentionBlock(config)
         self.mlp = MLP(inner_dim, config)
 
-        init_weights(self.ln_1)
+        init_weights(self.ln_1, config)
 
     def forward(
         self,
@@ -281,8 +281,8 @@ class BaseModel(torch.nn.Module):
         self.ln_f = torch.nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.rotary_dim = min(config.rotary_dim, config.n_ctx // config.num_attention_heads)
         
-        init_weights(self.wte)
-        init_weights(self.ln_f)
+        init_weights(self.wte, config)
+        init_weights(self.ln_f, config)
 
     def forward(
         self,
