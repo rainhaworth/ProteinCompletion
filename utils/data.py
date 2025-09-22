@@ -151,7 +151,8 @@ class ProteinBindingData(Dataset):
         targets = torch.tensor(targets)
         targets = torch.where(targets >= 0, seq[targets], targets)
 
-        return seq, attn, offset, targets
+        # unified training data format: inputs, targets, attns
+        return seq, targets, attn
 
 # generation dataset
 class ProteinBindingOnlyData(Dataset):
@@ -212,9 +213,7 @@ class MaskedProteinData(Dataset):
 
         self.max_dim = max_dim
         # load entire dataset into working memory
-        # if you want to use a big dataset rewrite as iterable
         self.seqs = []
-        #self.idxs = []
 
         # get generator
         gen = make_gen_from_ext(file)
@@ -230,7 +229,6 @@ class MaskedProteinData(Dataset):
             if len(seq) < 20: continue
             # store
             self.seqs.append(torch.tensor(seq))
-            #self.idxs.append(idx)
 
             # have we hit max_samples?
             sample_count += 1
@@ -242,7 +240,6 @@ class MaskedProteinData(Dataset):
 
     def __getitem__(self, idx):
         seq = self.seqs[idx]
-        #idxs = self.idxs[idx]
 
         # if sequence is bigger than max_dim, take random subsequence
         offset = 0
@@ -275,10 +272,9 @@ class MaskedProteinData(Dataset):
         seq_tgt = torch.zeros(self.max_dim, dtype=int) - 100
         seq_tgt[mask_idx] = seq[mask_idx]
 
-        # pad sequences
+        # pad masked sequence
         if len(seq_mask) < self.max_dim:
-            #seq = torch.cat(( seq, torch.zeros(self.max_dim - len(seq)) )).to(int)
             seq_mask = torch.cat(( seq_mask, torch.zeros(self.max_dim - len(seq_mask)) )).to(int)
-        #mask_idx = torch.cat(( mask_idx, torch.zeros(self.max_dim - len(mask_idx)) )).to(int)
 
-        return seq_tgt, seq_mask#, mask_idx
+        # unified training data format: inputs, targets, attns
+        return seq_mask, seq_tgt, None

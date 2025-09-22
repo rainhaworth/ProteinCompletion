@@ -19,10 +19,8 @@ class print_time:
     def __exit__(self, type, value, traceback):
         print(f'{self.desc} took {time.time()-self.t:.02f}s')
 
-
 def set_env():
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
 
 def set_seed(seed, deterministic=True):
     np.random.seed(seed)
@@ -55,7 +53,7 @@ def init_weights(module, config):
         module.weight.data.fill_(1.0)
 
 # model loading function, ensuring compatibility with old checkpoints
-def load_compat(model_class, config_file, device, checkpoint='', training=False, drop_lm_head=False):
+def load_compat(model_class, config_file, device, checkpoint='', training=False):
     with open(config_file, 'r') as f:
         cj = json.load(f)
     config = BaseConfig(
@@ -80,7 +78,12 @@ def load_compat(model_class, config_file, device, checkpoint='', training=False,
         states = torch.load(checkpoint, map_location='cpu')
         start_step = states['step']
 
-        # ensure compatibility
+        # if we have no lm_head in our model, don't try to load
+        drop_lm_head = False
+        if 'lm_head.weight' not in model.state_dict().keys():
+            drop_lm_head = True
+
+        # drop any unused keys
         state_dict = states['model_state']
         keys_to_del = []
         for key in state_dict.keys():

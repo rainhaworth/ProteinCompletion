@@ -8,7 +8,7 @@ from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.config import BaseConfig
 from utils.data import ProteinBindingData, MaskedProteinData
-from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom
+from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat
 
 from transformers import get_scheduler
 
@@ -43,7 +43,12 @@ def main():
     device = torch.device(args.device)
     configf = f'./{args.config}.json'
     ckpt = args.ckpt
-    bidirectional = (args.model_type == 'bidirectional')
+    if args.model_type == 'bidirectional':
+        model_class = BidirectionalCausalLM
+        data_class = ProteinBindingData
+    else:
+        model_class = ESMlikeLM
+        data_class = MaskedProteinData
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -52,43 +57,7 @@ def main():
     # load model, parameters, tokenizer
 
     with print_time('loading parameters'):
-        with open(configf, 'r') as f:
-            cj = json.load(f)
-        config = BaseConfig(
-            cj['vocab_size'],
-            cj['n_positions'],
-            cj['n_ctx'],
-            cj['n_embd'],
-            cj['n_layer'],
-            cj['n_head'],
-            resid_pdrop=cj['resid_pdrop'],
-            embd_pdrop=cj['embd_pdrop'],
-            attn_pdrop=cj['embd_pdrop'],
-            use_cache=False,
-            bos_token_id=1,
-            eos_token_id=2
-        )
-
-        if bidirectional:
-            model = BidirectionalCausalLM(config)
-        else:
-            model = ESMlikeLM(config)
-        
-        if ckpt != '' and os.path.exists(ckpt):
-            print('loading from checkpoint')
-            states = torch.load(ckpt, map_location='cpu')
-            start_step = states['step']
-            model.load_state_dict(states['model_state'])
-        else:
-            print('training from scratch')
-            start_step = 0
-            states = None
-        
-        # optimizer ends up on cpu if we don't declare after model.to(device)
-        model.to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-        if states is not None: optimizer.load_state_dict(states['optim_state'])
-
+        model, optimizer, start_step = load_compat(model_class, configf, device, ckpt, training=True)
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
@@ -100,10 +69,7 @@ def main():
         return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.train):
-        if bidirectional:
-            train_dataset = ProteinBindingData(args.train, tokenizer, max_dim=cj['n_ctx'], max_samples=args.max_samples)
-        else:
-            train_dataset = MaskedProteinData(args.train, tokenizer, max_dim=cj['n_ctx'], max_samples=args.max_samples)
+        train_dataset = data_class(args.train, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -130,35 +96,24 @@ def main():
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
             batches = 0
-            for data_batch in train_dataloader:
+            for seqs, targets, attns in train_dataloader:
                 # resume from step
                 if step_count < start_step:
                     step_count += 1
                     lr_scheduler.step()
                     continue
 
-                if bidirectional:
-                    seqs, attns, offsets, targets = data_batch
-                    # put everything on the GPU
-                    seqs = seqs.to(device)
+                # put everything on the GPU
+                seqs = seqs.to(device)
+                targets = targets.to(device)
+                if attns is not None:
                     attns = attns.to(device)
-                    offsets = offsets.to(device) # TODO: remove if remains unused
-                    targets = targets.to(device)
-                else:
-                    seqs_gt, seqs_masked = data_batch
-                    targets = seqs_gt.to(device)
-                    seqs = seqs_masked.to(device)
-                    attns=None
-                    offsets=None
                 
                 with torch.amp.autocast(device.type):
-                    logits = model(seqs,
-                                    attention_mask=attns,
-                                    pos_offsets=offsets).logits
+                    logits = model(seqs, attention_mask=attns)
 
                     # squish logits + targets, compute loss
-                    # TODO: retrieve original lm_head size somehow instead of doing this
-                    loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
+                    loss = loss_fn(logits.view(-1, model.config.vocab_size), targets.view(-1))
                 scaler.scale(loss).backward()
 
                 # unscale then apply gradient clipping

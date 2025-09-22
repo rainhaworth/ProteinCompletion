@@ -158,10 +158,8 @@ def main():
     device = torch.device(args.device)
     if args.model_type == 'bidirectional':
         model_class = BidirectionalCausalLM
-        drop_lm_head = True
     else:
         model_class = ESMlikeLM
-        drop_lm_head = False
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -170,7 +168,7 @@ def main():
     # (3) load
 
     with print_time('loading model'):
-        model = load_compat(model_class, args.config, device, args.weights, training=False, drop_lm_head=drop_lm_head)
+        model = load_compat(model_class, args.config, device, args.weights, training=False)
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
@@ -237,6 +235,7 @@ def main():
             print('generated:\t', tokenizer.decode(seq.squeeze().numpy(force=True)))
 
             # compute CE as mean across prev and next predictions
+            # TODO: compatibility with ESMlike
             mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
             logits = model(seq, attention_mask=mask)
             logits = torch.squeeze(logits, 0)
