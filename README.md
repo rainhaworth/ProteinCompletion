@@ -5,7 +5,7 @@
 - `train.py`: full training run from scratch with checkpointing
 - `generate.py`: generate sample proteins
 - `eval.py`: basic perplexity and prediction accuracy evaluation
-- `utils/model_base.py`: defines all model components and some model components
+- `utils/model_base.py`: defines all model components except prediction head
 - `utils/model_bidirectional.py`: novel bidirectional causal masking model; increases size of LM head
 - `utils/model_esmlike.py`: bidirectional model based on ESM3
 - `utils/data.py`: all PyTorch `Dataset` definitions for preprocessing input data
