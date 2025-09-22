@@ -11,7 +11,7 @@ from utils.config import BaseConfig
 # import custom dataset
 from utils.data import ProteinBindingOnlyData
 from utils.mask import idx_to_segments
-from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom
+from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat
 
 from tqdm import tqdm
 
@@ -73,7 +73,7 @@ def gen_step(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=n
 
     # make mask, call model, squeeze batch dim to make life easier
     mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
-    logits = model(seq, attention_mask=mask).logits
+    logits = model(seq, attention_mask=mask)
     logits = torch.squeeze(logits, 0)
 
     # get PTP/NTP logits
@@ -156,7 +156,12 @@ def main():
         args.device = 'cpu'
 
     device = torch.device(args.device)
-    bidirectional = (args.model_type == 'bidirectional')
+    if args.model_type == 'bidirectional':
+        model_class = BidirectionalCausalLM
+        drop_lm_head = True
+    else:
+        model_class = ESMlikeLM
+        drop_lm_head = False
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -165,33 +170,7 @@ def main():
     # (3) load
 
     with print_time('loading model'):
-        model = torch.load(args.weights, weights_only=False)
-        # if dict, expect config arg to be provided
-        if type(model) is dict:
-            dt = model
-            with open(args.config, 'r') as f:
-                cj = json.load(f)
-            config = BaseConfig(
-                cj['vocab_size'],
-                cj['n_positions'],
-                cj['n_ctx'],
-                cj['n_embd'],
-                cj['n_layer'],
-                cj['n_head'],
-                resid_pdrop=cj['resid_pdrop'],
-                embd_pdrop=cj['embd_pdrop'],
-                attn_pdrop=cj['embd_pdrop'],
-                use_cache=False,
-                bos_token_id=1,
-                eos_token_id=2
-            )
-            if bidirectional:
-                model = BidirectionalCausalLM(config)
-            else:
-                model = ESMlikeLM(config)
-            model.load_state_dict(dt['model_state'])
-            model.to(device)
-
+        model = load_compat(model_class, args.config, device, args.weights, training=False, drop_lm_head=drop_lm_head)
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
@@ -259,7 +238,7 @@ def main():
 
             # compute CE as mean across prev and next predictions
             mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
-            logits = model(seq, attention_mask=mask).logits
+            logits = model(seq, attention_mask=mask)
             logits = torch.squeeze(logits, 0)
 
             half_sz = logits.size(-1) // 2

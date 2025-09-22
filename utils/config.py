@@ -20,11 +20,8 @@ class BaseConfig:
         gradient_checkpointing=False,
         use_cache=True,
         bos_token_id=50256,
-        eos_token_id=50256,
-        **kwargs
+        eos_token_id=50256
     ):
-        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
-
         self.vocab_size = vocab_size
         self.n_ctx = n_ctx
         self.n_positions = n_positions

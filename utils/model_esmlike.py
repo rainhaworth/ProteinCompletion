@@ -1,15 +1,13 @@
 # esm-like model
 import torch
-from .model_base import BaseModel, init_weights
+from .model_base import BaseModel
 
-class ESMlikeLM(BaseModel):
-
+class ESMlikeLM(torch.nn.Module):
     def __init__(self, config):
         super().__init__(config)
+        self.config = config
         self.transformer = BaseModel(config)
         self.lm_head = torch.nn.Linear(config.n_embd, config.vocab_size)
-        
-        init_weights(self.lm_head, config)
 
     def forward(
         self,

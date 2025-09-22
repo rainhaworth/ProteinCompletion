@@ -2,22 +2,6 @@
 import torch
 import torch.utils.checkpoint
 
-# weight initializer
-def init_weights(module, config):
-    if isinstance(module, (torch.nn.Linear,)):
-        # Slightly different from Mesh Transformer JAX which uses truncated_normal for initialization
-        # cf https://github.com/pytorch/pytorch/pull/5617
-        module.weight.data.normal_(mean=0.0, std=config.initializer_range)
-        if module.bias is not None:
-            module.bias.data.zero_()
-    elif isinstance(module, torch.nn.Embedding):
-        module.weight.data.normal_(mean=0.0, std=config.initializer_range)
-        if module.padding_idx is not None:
-            module.weight.data[module.padding_idx].zero_()
-    elif isinstance(module, torch.nn.LayerNorm):
-        module.bias.data.zero_()
-        module.weight.data.fill_(1.0)
-
 # RoPE
 def fixed_pos_embedding(x, seq_dim=1, seq_len=None):
     dim = x.shape[-1]
@@ -68,9 +52,6 @@ class AttentionBlock(torch.nn.Module):
         self.rotary_dim = None
         if config.rotary_dim is not None:
             self.rotary_dim = config.rotary_dim
-
-        init_weights(self.qkv_proj, config)
-        init_weights(self.out_proj, config)
 
     def _split_heads(self, x, n_head, dim_head, mp_num):
         reshaped = x.reshape(x.shape[:-1] + (n_head//mp_num, dim_head))
@@ -213,9 +194,6 @@ class MLP(torch.nn.Module):
         self.act = SwiGLU()
         self.dropout = torch.nn.Dropout(config.resid_pdrop)
 
-        init_weights(self.fc_in, config)
-        init_weights(self.fc_out, config)
-
     def forward(self, hidden_states):
         hidden_states = self.fc_in(hidden_states)
         hidden_states = self.act(hidden_states)
@@ -232,8 +210,6 @@ class DecoderBlock(torch.nn.Module):
         self.attn = AttentionBlock(config)
         self.mlp = MLP(inner_dim, config)
 
-        init_weights(self.ln_1, config)
-
     def forward(
         self,
         hidden_states,
@@ -242,7 +218,6 @@ class DecoderBlock(torch.nn.Module):
         head_mask=None,
         use_cache=False,
         output_attentions=False,
-        pos_offsets=None,
     ):
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -253,7 +228,6 @@ class DecoderBlock(torch.nn.Module):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            pos_offsets=pos_offsets,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
@@ -280,9 +254,6 @@ class BaseModel(torch.nn.Module):
         self.h = torch.nn.ModuleList([DecoderBlock(config) for _ in range(config.n_layer)])
         self.ln_f = torch.nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.rotary_dim = min(config.rotary_dim, config.n_ctx // config.num_attention_heads)
-        
-        init_weights(self.wte, config)
-        init_weights(self.ln_f, config)
 
     def forward(
         self,
@@ -296,15 +267,12 @@ class BaseModel(torch.nn.Module):
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
-        return_dict=None,
-        pos_offsets=None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = output_attentions if output_attentions is not None else False
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else False
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -337,7 +305,7 @@ class BaseModel(torch.nn.Module):
         # create broadcastable + functional attention mask
         if attention_mask is not None:
             attention_mask = attention_mask[:, None, :, :]
-            attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+            #attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
             attention_mask = (1.0 - attention_mask) * -10000.0
         
         # currently not implemented but don't want to drop the functionality entirely
@@ -376,7 +344,7 @@ class BaseModel(torch.nn.Module):
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value
-                        return module(*inputs, use_cache, output_attentions, pos_offsets)
+                        return module(*inputs, use_cache, output_attentions)
 
                     return custom_forward
 
@@ -395,7 +363,6 @@ class BaseModel(torch.nn.Module):
                     head_mask=head_mask[i],
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    pos_offsets=pos_offsets
                 )
 
             hidden_states = outputs[0]
@@ -411,8 +378,5 @@ class BaseModel(torch.nn.Module):
         # Add last hidden state
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, presents, all_hidden_states, all_self_attentions] if v is not None)
 
         return hidden_states, presents, all_hidden_states, all_self_attentions

@@ -1,20 +1,13 @@
 # bidirectional causal masking model
 import torch
-from .model_base import BaseModel, init_weights
+from .model_base import BaseModel
 
-class BidirectionalCausalLM(BaseModel):
+class BidirectionalCausalLM(torch.nn.Module):
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.transformer = BaseModel(config)
-        self.lm_head = torch.nn.Linear(config.n_embd, config.vocab_size)
-
-        # throw out old LM head, make new one for multiple targets per pos
-        # TODO: remove old lm_head if possible without breaking anything
-        in_f = self.lm_head.in_features
-        out_f = self.lm_head.out_features * 2
-        self.multi_lm_head = torch.nn.Linear(in_f, out_f)
-
-        init_weights(self.multi_lm_head, config)
+        self.multi_lm_head = torch.nn.Linear(config.n_embd, config.vocab_size * 2)
 
     def forward(
         self,
@@ -28,8 +21,6 @@ class BidirectionalCausalLM(BaseModel):
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
-        return_dict=None,
-        pos_offsets=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
@@ -37,7 +28,6 @@ class BidirectionalCausalLM(BaseModel):
             ``labels = input_ids`` Indices are selected in ``[-100, 0, ..., config.vocab_size]`` All labels set to
             ``-100`` are ignored (masked), the loss is only computed for labels in ``[0, ..., config.vocab_size]``
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         transformer_outputs = self.transformer(
             input_ids,
@@ -50,8 +40,6 @@ class BidirectionalCausalLM(BaseModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            pos_offsets=pos_offsets,
         )
         hidden_states = transformer_outputs[0]
 
