@@ -1,12 +1,10 @@
 # generate complete proteins from fragments
 import numpy as np
 import argparse
-import json
 import torch
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
-from utils.config import BaseConfig
 
 # import custom dataset
 from utils.data import ProteinBindingOnlyData

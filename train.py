@@ -1,12 +1,10 @@
 # training script modified from https://github.com/salesforce/progen/blob/main/progen2/sample.py
 import os
 import argparse
-import json
 import torch
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
-from utils.config import BaseConfig
 from utils.data import ProteinBindingData, MaskedProteinData
 from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat
 
