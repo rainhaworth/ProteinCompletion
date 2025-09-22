@@ -5,7 +5,8 @@ import json
 import torch
 
 from utils.model_bidirectional import BidirectionalCausalLM
-from repo.utils.config import BaseConfig
+from utils.model_esmlike import ESMlikeLM
+from utils.config import BaseConfig
 
 # import custom dataset
 from utils.data import ProteinBindingOnlyData
@@ -144,6 +145,7 @@ def main():
     parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
     parser.add_argument('--config', type=str, default='./config-medium.json')
+    parser.add_argument('--model_type', choices=['bidirectional','esmlike'], default='bidirectional')
     args = parser.parse_args()
 
     set_env()
@@ -154,6 +156,7 @@ def main():
         args.device = 'cpu'
 
     device = torch.device(args.device)
+    bidirectional = (args.model_type == 'bidirectional')
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -182,7 +185,10 @@ def main():
                 bos_token_id=1,
                 eos_token_id=2
             )
-            model = BidirectionalCausalLM(config)
+            if bidirectional:
+                model = BidirectionalCausalLM(config)
+            else:
+                model = ESMlikeLM(config)
             model.load_state_dict(dt['model_state'])
             model.to(device)
 
@@ -228,6 +234,7 @@ def main():
 
             for _ in tqdm(range(max_steps)):
                 # generate next token if possible
+                # TODO: custom gen_step for ESMlikeLM
                 new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, rp, rw, sample_fn)
                 if new_token == None: break
 
