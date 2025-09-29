@@ -156,7 +156,7 @@ class ProteinBindingData(Dataset):
 
 # generation dataset
 class ProteinBindingOnlyData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=15):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=15, keep_len=False):
         self.max_dim = max_dim
         self.seqs = []
         self.idxs = []
@@ -169,22 +169,24 @@ class ProteinBindingOnlyData(Dataset):
         for seq, idx in gen:
             # tokenize
             seq = tokenizer.encode(seq).ids
-            # add BOS, EOS (see tokenizer.json)
-            seq = [1] + seq + [2]
+
+            # if keeping full sequence length, enforce bounds now
+            if keep_len: seq = seq[:max_dim]
+
             # generate artificial binding site if necessary
-            if idx is None:
-                idx = rand_mask_start(len(seq), self.max_dim, just_binding=True)
+            if idx is None: idx = rand_mask_start(len(seq), self.max_dim, just_binding=True)
             # otherwise, adjust for extra token then randomly drop indices
-            else:
-                idx += 1
-                idx = apply_dropout(idx)
-            # store smallest possible subsequence
-            seq = seq[idx[0] : idx[-1] + 1]
-            # trim, just in case; TODO: remove this when we can handle long seqs
-            seq = seq[:max_dim]
+            else: idx = apply_dropout(idx)
+            
+            if not keep_len:
+                # store smallest possible subsequence
+                seq = seq[idx[0] : idx[-1] + 1]
+                seq = seq[:max_dim]
+                idx -= idx[0]
+
             # store
             self.seqs.append(torch.tensor(seq))
-            self.idxs.append(idx - idx[0])
+            self.idxs.append(idx)
 
             # have we hit max_samples?
             sample_count += 1
