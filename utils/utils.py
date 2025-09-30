@@ -32,7 +32,7 @@ def set_seed(seed, deterministic=True):
         torch.backends.cudnn.deterministic = deterministic
         torch.backends.cudnn.benchmark = not deterministic
 
-def create_tokenizer_custom(file):
+def create_tokenizer_custom(file: str) -> Tokenizer:
     with open(file, 'r') as f:
         return Tokenizer.from_str(f.read())
     

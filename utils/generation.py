@@ -44,13 +44,18 @@ def nucleus_sample(logits, p=0.95):
     return idx_flat // logits.shape[1], idx_flat % logits.shape[1]
 
 # causal bidirectional generation
-def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False):
+def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=True):
     # get segments; use copy of idxs so we don't have weird memory issues
     segments = idx_to_segments(idxs.detach().clone())
 
     # get PTP/NTP indices
     p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] not in [BOS_ID, BOS_ID+2]]
     n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] not in [EOS_ID, EOS_ID+2]]
+
+    # if not predicting terminals, assume fixed window like ESM
+    if not predict_terminals:
+        if len(p_idxs) > 0 and p_idxs[0] == 0: p_idxs.pop(0)
+        if len(n_idxs) > 0 and n_idxs[-1] == seq.size(1) - 1: n_idxs.pop(-1)
 
     # stop inference if we have no valid steps
     if len(n_idxs) == 0 and len(p_idxs) == 0: return None, None
@@ -81,12 +86,13 @@ def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=
     drop_val = -1e9
     mask = torch.zeros_like(logits)
     mask[:,invalid_ids] = drop_val
-    # if we can predict BOS, allow
-    if len(p_idxs) > 0 and p_idxs[0] == 0:
-        mask[0, [BOS_ID, BOS_ID+2]] = 0
-    # same for EOS
-    if len(n_idxs) > 0 and n_idxs[-1] == seq.size(1) - 1:
-        mask[-1, [EOS_ID, EOS_ID+2]] = 0
+    if predict_terminals:
+        # if we can predict BOS, allow
+        if len(p_idxs) > 0 and p_idxs[0] == 0:
+            mask[0, [BOS_ID, BOS_ID+2]] = 0
+        # same for EOS
+        if len(n_idxs) > 0 and n_idxs[-1] == seq.size(1) - 1:
+            mask[-1, [EOS_ID, EOS_ID+2]] = 0
     logits += mask
 
     # compute (numerically stable) softmax over all logits representing viable next steps
@@ -107,7 +113,12 @@ def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=
     return new_token, new_pos
 
 # esmlike generation
-def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False):
+def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=None):
+    # unimplemented: repetition penalties, predict_terminals
+
+    # stop generation if we run out of positions to predict
+    if len(idxs) == len(seq): return None, None
+
     # get logits (L,V)
     mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
     logits = model(seq, attention_mask=mask)
@@ -122,7 +133,7 @@ def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sam
     # softmax
     logits_softmax = torch.nn.functional.softmax(logits, -1)
 
-    if return_logits: return logits_softmax
+    if return_logits: return logits_softmax, None
 
     # get entropy at each position (L), pick inference position with lowest entropy
     entropy = torch.distributions.Categorical(logits=logits.log_softmax(-1)).entropy()

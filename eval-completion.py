@@ -1,23 +1,13 @@
 # eval by completing partial proteins
-import os
-import time
-import random
 import numpy as np
 import argparse
-
 import torch
 
-from tokenizers import Tokenizer
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import make_gen_from_ext
-from utils.mask import idx_to_segments
 from utils.utils import print_time, set_env, set_seed, load_compat, create_tokenizer_custom
-
-# import generation step function
-from generate import gen_step, make_inference_mask, greedy_sample, nucleus_sample
-
-from tqdm import tqdm
+from utils.generation import gen_step_bidirectional, gen_step_esmlike, make_inference_mask
 
 
 PAD_ID = 0
@@ -25,29 +15,25 @@ BOS_ID = 1
 EOS_ID = 2
 VALID_AAS = 'ACDEFGHIKLMNPQRSTVWY' # restrict generation to 20 standard amino acids
 
-def cross_entropy_2way(seq, logits):
+def cross_entropy_2way(logits, seq):
     half_sz = logits.size(-1) // 2
     p_logits = logits[1:,:half_sz]
     n_logits = logits[:-1,half_sz:]
-    p_toks = seq[0,:-1]
-    n_toks = seq[0,1:]
+    p_toks = seq[:-1]
+    n_toks = seq[1:]
 
     ce = [torch.nn.functional.cross_entropy(p_logits, p_toks), torch.nn.functional.cross_entropy(n_logits, n_toks)]
     #ce /= 2
     ce = np.array([x.numpy(force=True) for x in ce])
     return ce
 
-def seq_to_ce(seq, model, tokenizer, device):
-    idxs = list(range(len(seq)))
-    seq = tokenizer.encode(seq).ids
-    seq = torch.tensor(seq).to(device)
-    seq = seq[None,:]
+# assume tokenized tensor seq
+def seq_to_ce(seq : torch.Tensor, model, device, ce_fn=cross_entropy_2way):
+    idxs = list(range(seq.size(1)))
 
     mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
-    logits = model(seq, attention_mask=mask).logits
-    logits = torch.squeeze(logits, 0)
-
-    ce = cross_entropy_2way(seq, logits)
+    logits = model(seq, attention_mask=mask)
+    ce = ce_fn(logits.squeeze(0), seq.squeeze(0))
     return ce
 
 
@@ -73,8 +59,12 @@ def main():
 
     if args.model_type == 'bidirectional':
         model_class = BidirectionalCausalLM
+        gen_step = gen_step_bidirectional
+        ce_fn = cross_entropy_2way
     else:
         model_class = ESMlikeLM
+        gen_step = gen_step_esmlike
+        ce_fn = torch.nn.functional.cross_entropy
     
     set_env()
     set_seed(args.rng_seed, deterministic=args.rng_deterministic)
@@ -115,68 +105,57 @@ def main():
     with print_time('evaluating'):
         n = 0
         prev_seq = None
-        ppls = []
         for seq, _ in dataset:
             if seq == prev_seq: continue
             if len(seq) < 100 or len(seq) > 5000: continue
-            else: prev_seq = seq
-            print('seq:', seq)
 
-            init_seq = seq
+            print('seq:', seq)
+            prev_seq = seq
 
             # 2 problem settings: contiguous + fragmented subseq
             for contiguous in [False,True]:
                 for keep_frac in keep_fracs:
-                    # get subseq
-                    keep_sz = max(1, int(keep_frac * len(seq)))
+                    # get subseq idxs
+                    keep_sz = max(1, int(keep_frac * len(prev_seq)))
                     
                     if contiguous:
-                        keep_start = np.random.randint(0, len(seq)-keep_sz+1)
+                        keep_start = np.random.randint(0, len(prev_seq)-keep_sz+1)
                         keep_idx = np.arange(keep_start, keep_start+keep_sz)
                     else:
-                        keep_idx = np.sort(np.random.choice(range(len(seq)), keep_sz, replace=False))
+                        keep_idx = np.sort(np.random.choice(range(len(prev_seq)), keep_sz, replace=False))
                     
                     # make tensors
-                    seq = init_seq[keep_idx[0]:keep_idx[-1]+1]
-                    seq = tokenizer.encode(seq).ids
-                    seq = [BOS_ID] + seq + [EOS_ID]
-                    seqlen = len(seq)
+                    seq = tokenizer.encode(prev_seq).ids
                     seq = torch.tensor(seq).to(device)
                     seq = seq[None,:]
-                    idxs = torch.tensor(keep_idx - keep_idx[0])
+                    idxs = torch.tensor(keep_idx).to(device)
                     
                     # generate
                     # TODO: constrain to fill in the middle if non contiguous
-                    gen_steps = len(seq) - keep_sz
-                    for _ in range(gen_steps):
-                        # generate next token if possible
-                        new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids)
-                        if new_token == None: break
+                    gen_steps = len(prev_seq) - keep_sz
+                    for gs in range(gen_steps):
+                        # generate next token
+                        new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False)
+                        if new_token == None:
+                            print('generation failed on step', gs)
+                            print('seq', seq)
+                            print('idxs', idxs)
+                            break
 
                         # update seq and idxs
-                        new_token = new_token[None,None]
-                        if new_pos == -1:
-                            # prepend, shift all indices up
-                            seq = torch.cat([new_token, seq], dim=-1)
-                            idxs = torch.cat([new_pos[None], idxs])
-                            idxs += 1
-                        elif new_pos == seq.size(1):
-                            # append
-                            seq = torch.cat([seq, new_token], dim=-1)
-                            idxs = torch.cat([idxs, new_pos[None]])
-                        else:
-                            # insert
-                            seq[:,new_pos] = new_token
-                            idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
-                            idxs = idxs.sort()[0]
+                        seq[:,new_pos] = new_token[None,None]
+                        idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
 
                     print('generated {:.2f}%, contiguous = {}, CE {}: {}'.format(
                         (1-keep_frac)*100,
                         contiguous,
-                        seq_to_ce(seq, model, tokenizer, device),
+                        seq_to_ce(seq, model, device, ce_fn),
                         tokenizer.decode(seq.squeeze().numpy(force=True))
                         )
                     )
+            n += 1
+            if n > 10: break
+            print()
 
 if __name__ == '__main__':
     main()
