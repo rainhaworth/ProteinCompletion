@@ -36,6 +36,17 @@ def seq_to_ce(seq : torch.Tensor, model, device, ce_fn=cross_entropy_2way):
     ce = ce_fn(logits.squeeze(0), seq.squeeze(0))
     return ce
 
+# compute shannon entropy by character frequencies
+def seq_entropy(seq : str, ignore_idxs):
+    idxs = set(ignore_idxs)
+    freqs = {c: 0 for c in VALID_AAS}
+    for i, c in enumerate(seq):
+        if i in idxs: continue
+        freqs[c] += 1
+    freqs = np.array(list(freqs.values()), dtype=float)
+    freqs = freqs[freqs != 0]
+    freqs /= np.sum(freqs)
+    return -np.sum(freqs * np.log2(freqs))
 
 
 def main():
@@ -146,10 +157,12 @@ def main():
                         seq[:,new_pos] = new_token[None,None]
                         idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
 
-                    print('generated {:.2f}%, contiguous = {}, CE {}: {}'.format(
+                    seq_str = tokenizer.decode(seq.squeeze().numpy(force=True))
+                    print('generated {:.2f}%, contiguous = {}, PPL {}, SE {}: {}'.format(
                         (1-keep_frac)*100,
                         contiguous,
-                        seq_to_ce(seq, model, device, ce_fn),
+                        2 ** seq_to_ce(seq, model, device, ce_fn),
+                        seq_entropy(seq_str, keep_idx),
                         tokenizer.decode(seq.squeeze().numpy(force=True))
                         )
                     )
