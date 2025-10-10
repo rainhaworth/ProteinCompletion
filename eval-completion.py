@@ -9,6 +9,8 @@ from utils.data import make_gen_from_ext
 from utils.utils import print_time, set_env, set_seed, load_compat, create_tokenizer_custom
 from utils.generation import gen_step_bidirectional, gen_step_esmlike, make_inference_mask
 
+from tqdm import tqdm
+
 
 PAD_ID = 0
 BOS_ID = 1
@@ -23,7 +25,6 @@ def cross_entropy_2way(logits, seq):
     n_toks = seq[1:]
 
     ce = [torch.nn.functional.cross_entropy(p_logits, p_toks), torch.nn.functional.cross_entropy(n_logits, n_toks)]
-    #ce /= 2
     ce = np.array([x.numpy(force=True) for x in ce])
     return ce
 
@@ -66,6 +67,7 @@ def main():
     parser.add_argument('--max-window', type=int, default=-1)
     parser.add_argument('--config', type=str, default='./config-medium.json')
     parser.add_argument('--model_type', choices=['bidirectional','esmlike'], default='bidirectional')
+    parser.add_argument('--output', default='./out.tsv')
     args = parser.parse_args()
 
     if args.model_type == 'bidirectional':
@@ -113,8 +115,8 @@ def main():
 
     keep_fracs = [0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8]
 
-    with print_time('evaluating'):
-        n = 0
+    with print_time('evaluating'), open(args.output, 'w') as outf:
+        outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
         prev_seq = None
         for seq, _ in dataset:
             if seq == prev_seq: continue
@@ -144,7 +146,7 @@ def main():
                     # generate
                     # TODO: constrain to fill in the middle if non contiguous
                     gen_steps = len(prev_seq) - keep_sz
-                    for gs in range(gen_steps):
+                    for gs in tqdm(range(gen_steps)):
                         # generate next token
                         new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False)
                         if new_token == None:
@@ -158,17 +160,15 @@ def main():
                         idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
 
                     seq_str = tokenizer.decode(seq.squeeze().numpy(force=True))
-                    print('generated {:.2f}%, contiguous = {}, PPL {}, SE {}: {}'.format(
+                    outf.write('{:.2f}\t{}\t{}\t{:.2f}\t{}\t{}\n'.format(
                         (1-keep_frac)*100,
                         contiguous,
                         2 ** seq_to_ce(seq, model, device, ce_fn),
                         seq_entropy(seq_str, keep_idx),
+                        keep_idx,
                         tokenizer.decode(seq.squeeze().numpy(force=True))
                         )
                     )
-            n += 1
-            if n > 10: break
-            print()
 
 if __name__ == '__main__':
     main()
