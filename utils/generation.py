@@ -117,7 +117,7 @@ def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sam
     # unimplemented: repetition penalties, predict_terminals
 
     # stop generation if we run out of positions to predict
-    if len(idxs) == len(seq): return None, None
+    if len(idxs) == seq.size(1): return None, None
 
     # get logits (L,V)
     mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
