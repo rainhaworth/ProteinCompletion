@@ -12,9 +12,9 @@
 - `utils/mask.py`: custom causal mask generation
 - `utils/config.py`: defines `BaseConfig`, setting default values; config json files will always override these settings
 - `utils/utils.py`: all other utility functions, notably including model and tokenizer loading
-- 'StructureEvaluation/structure_evaluator_driver.py':
-- 'StructureEvaluation/structure_evaluator.py':
-- 'StructureEvaluation/generated_parser.py':
-- 'StructureEvaluation/figure_generator.py':
-- 'StructureEvaluation/gen_combined_figs_driver.py':
-- 'StructureEvaluation/gen_figs_single_driver.py':
+- 'StructureEvaluation/structure_evaluator_driver.py': 
+- 'StructureEvaluation/structure_evaluator.py': 
+- 'StructureEvaluation/generated_parser.py': 
+- 'StructureEvaluation/figure_generator.py': 
+- 'StructureEvaluation/gen_combined_figs_driver.py': 
+- 'StructureEvaluation/gen_figs_single_driver.py': 
