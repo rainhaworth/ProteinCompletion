@@ -12,9 +12,9 @@
 - `utils/mask.py`: custom causal mask generation
 - `utils/config.py`: defines `BaseConfig`, setting default values; config json files will always override these settings
 - `utils/utils.py`: all other utility functions, notably including model and tokenizer loading
-- `StructureEvaluation/structure_evaluator_driver.py`: 
-- `StructureEvaluation/structure_evaluator.py`: 
-- `StructureEvaluation/generated_parser.py`: 
-- `StructureEvaluation/figure_generator.py`: 
-- `StructureEvaluation/gen_combined_figs_driver.py`: 
-- `StructureEvaluation/gen_figs_single_driver.py`: 
+- `StructureEvaluation/structure_evaluator_driver.py`: main driver for running structure prediction and evaluation on generated sequences using ESM3's structure track
+- `StructureEvaluation/structure_evaluator.py`: wraps the structure prediction model and computes structural metrics (pTM, pLDDT) for generated and non-generated regions
+- `StructureEvaluation/generated_parser.py`: utilities for parsing generated-sequence TSVs and original baseline sequence TSVs used in structure evaluation
+- `StructureEvaluation/figure_generator.py`: defines all plotting utilities for structure evaluation, including single-model and multi-model figures
+- `StructureEvaluation/gen_combined_figs_driver.py`: driver script for generating combined (multi-model) structure evaluation figures from saved result TSVs
+- `StructureEvaluation/gen_figs_single_driver.py`: driver script for generating structure evaluation figures for a single model
