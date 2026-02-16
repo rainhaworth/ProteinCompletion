@@ -156,7 +156,7 @@ def idx_to_path_targets_largest(idx, seqlen, dim=512):
 
 # from path, i.e. sequence of indices representing steps, and indices of known monomers, generate mask
 def path_to_mask(path, idx, dim=512):
-    mask = np.zeros((dim, dim))
+    mask = np.zeros((dim, dim), dtype=int)
 
     # for each index in original binding site, unmask the entire column
     mask[:len(path)+len(idx), idx] = 1
