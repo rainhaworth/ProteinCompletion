@@ -109,3 +109,15 @@ def load_compat(model_class, config_file, device, checkpoint='', training=False)
         return model, optimizer, start_step
     
     return model
+
+# transformer LR scheduler, from https://huggingface.co/transformers/v4.4.2/_modules/transformers/optimization.html#get_linear_schedule_with_warmup
+# we don't use anything else from transformers so this avoids the import entirely
+def get_scheduler(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return max(
+            0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
+        )
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)

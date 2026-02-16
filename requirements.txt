@@ -4,4 +4,3 @@ numpy==2.3.3
 tokenizers==0.22.1
 torch==2.7.1
 tqdm==4.67.1
-transformers==4.53.3

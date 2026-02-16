@@ -6,10 +6,7 @@ import torch
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import ProteinBindingData, MaskedProteinData
-from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat
-
-from transformers import get_scheduler
-
+from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat, get_scheduler
 
 def main():
     parser = argparse.ArgumentParser()
@@ -20,8 +17,7 @@ def main():
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
-    parser.add_argument('--eval', type=str, default='')
+    parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=3)
@@ -64,10 +60,10 @@ def main():
     
     # helper function; keep it small and simple for now
     def make_dataloader(dataset):
-        return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
+        return torch.utils.data.DataLoader(dataset, batch_size=args.bsz)
 
-    with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.train):
-        train_dataset = data_class(args.train, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples)
+    with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.data):
+        train_dataset = data_class(args.data, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -77,11 +73,10 @@ def main():
     num_epochs = args.epochs
     num_training_steps = num_epochs * len(train_dataloader)
 
-    lr_scheduler = get_scheduler(
-            name='linear', optimizer=optimizer, num_warmup_steps=5000, num_training_steps=num_training_steps
-            )
+    lr_scheduler = get_scheduler(optimizer, 5000, num_training_steps)
+
     loss_fn = torch.nn.CrossEntropyLoss()
-    scaler = torch.GradScaler(device.type)    
+    scaler = torch.GradScaler(device.type)
 
     # train
 
