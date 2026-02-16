@@ -2,11 +2,12 @@
 import os
 import argparse
 import torch
+import numpy as np
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import ProteinBindingData, MaskedProteinData
-from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat, get_scheduler
+from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_model_compat, load_train_config
 
 def main():
     parser = argparse.ArgumentParser()
@@ -22,7 +23,9 @@ def main():
     parser.add_argument('--bsz', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--max-samples', type=int, default=1000)
-    parser.add_argument('--save-every', type=int, default=100000)
+    parser.add_argument('--total-steps', type=int, default=-1) # optional, specify total training step count
+    parser.add_argument('--warmup-steps', type=int, default=5000)
+    parser.add_argument('--save-every', type=int, default=100)
     parser.add_argument('--ckpt', type=str, default='')
     parser.add_argument('--model_type', choices=['bidirectional','esmlike'], default='bidirectional')
     args = parser.parse_args()
@@ -36,7 +39,7 @@ def main():
 
     device = torch.device(args.device)
     configf = f'./{args.config}.json'
-    ckpt = args.ckpt
+    checkpoint = args.ckpt
     if args.model_type == 'bidirectional':
         model_class = BidirectionalCausalLM
         data_class = ProteinBindingData
@@ -47,11 +50,20 @@ def main():
     if device.type == 'cpu':
         print('falling back to fp32')
         args.fp16 = False
+        
+    # load checkpoint if provided
+    if checkpoint != '' and os.path.exists(checkpoint):
+        with print_time('loading checkpoint data from ' + checkpoint):
+            states = torch.load(checkpoint, map_location='cpu', weights_only=False)
+            init_step = states['step']
+    else:
+        states = None
+        init_step = 0
 
     # load model, parameters, tokenizer
 
-    with print_time('loading parameters'):
-        model, optimizer, start_step = load_compat(model_class, configf, device, ckpt, training=True)
+    with print_time('loading model'):
+        model = load_model_compat(model_class, configf, device, states)
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
@@ -71,9 +83,10 @@ def main():
     # configure training
 
     num_epochs = args.epochs
-    num_training_steps = num_epochs * len(train_dataloader)
+    if args.total_steps != -1: num_training_steps = args.total_steps
+    else: num_training_steps = num_epochs * len(train_dataloader)
 
-    lr_scheduler = get_scheduler(optimizer, 5000, num_training_steps)
+    optimizer, lr_scheduler = load_train_config(model, args.warmup_steps, num_training_steps, states)
 
     loss_fn = torch.nn.CrossEntropyLoss()
     scaler = torch.GradScaler(device.type)
@@ -82,7 +95,7 @@ def main():
 
     model.train()
 
-    step_count = 0
+    step_count = init_step
     save_every = args.save_every
     print_every = 1000
     for epoch in range(num_epochs):
@@ -90,12 +103,6 @@ def main():
             total_loss = 0
             batches = 0
             for seqs, targets, attns in train_dataloader:
-                # resume from step
-                if step_count < start_step:
-                    step_count += 1
-                    lr_scheduler.step()
-                    continue
-
                 # put everything on the GPU
                 seqs = seqs.to(device)
                 targets = targets.to(device)
@@ -127,12 +134,16 @@ def main():
                     print('step {} loss: {:.5f} (this step {:.5f})'.format(step_count, total_loss / batches, loss.item()))
 
                 # save every N steps
-                if step_count != start_step and step_count % save_every == 0:
+                if step_count != init_step and step_count % save_every == 0:
                     save_path = os.path.join(args.save, 'train-' + args.model_type + '-step' + str(step_count) + '.pt')
                     torch.save({
                         'step': step_count,
                         'model_state': model.state_dict(),
-                        'optim_state': optimizer.state_dict()
+                        'optim_state': optimizer.state_dict(),
+                        'scheduler_state': lr_scheduler.state_dict(),
+                        'np_rand_state': np.random.get_state(),
+                        'torch_rand_state': torch.get_rng_state(),
+                        'torch_cuda_rand_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None
                     }, save_path)
                     print('saved to', save_path)
                 step_count += 1

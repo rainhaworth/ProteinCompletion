@@ -53,7 +53,7 @@ def init_weights(module, config):
         module.weight.data.fill_(1.0)
 
 # model loading function, ensuring compatibility with old checkpoints
-def load_compat(model_class, config_file, device, checkpoint='', training=False):
+def load_model_compat(model_class, config_file, device, states=None):
     with open(config_file, 'r') as f:
         cj = json.load(f)
     config = BaseConfig(
@@ -73,11 +73,7 @@ def load_compat(model_class, config_file, device, checkpoint='', training=False)
 
     model = model_class(config)
     
-    if checkpoint != '' and os.path.exists(checkpoint):
-        print('loading from checkpoint', checkpoint)
-        states = torch.load(checkpoint, map_location='cpu')
-        start_step = states['step']
-
+    if states is not None:
         # if we have no lm_head in our model, don't try to load
         drop_lm_head = False
         if 'lm_head.weight' not in model.state_dict().keys():
@@ -96,17 +92,8 @@ def load_compat(model_class, config_file, device, checkpoint='', training=False)
     else:
         print('initializing weights')
         model.apply(lambda x: init_weights(x, config))
-        start_step = 0
-        states = None
     
     model.to(device)
-
-    if training:
-        # optimizer ends up on cpu if we don't declare after model.to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-        if states is not None: optimizer.load_state_dict(states['optim_state'])
-
-        return model, optimizer, start_step
     
     return model
 
@@ -121,3 +108,20 @@ def get_scheduler(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1
         )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
+
+# load all other training state data from config
+def load_train_config(model, warmup_steps, train_steps, states=None):
+    # initialize
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    lr_scheduler = get_scheduler(optimizer, warmup_steps, train_steps)
+
+    # load all provided states
+    if states is not None:
+        if 'optim_state' in states.keys(): optimizer.load_state_dict(states['optim_state'])
+        if 'scheduler_state' in states.keys(): lr_scheduler.load_state_dict(states['scheduler_state'])
+        if 'np_rand_state' in states.keys(): np.random.set_state(states['np_rand_state'])
+        # torch CPU and CUDA use different rand states; can only ensure determinism if CUDA is always or never available throughout training
+        if 'torch_rand_state' in states.keys(): torch.set_rng_state(states['torch_rand_state'])
+        if 'torch_cuda_rand_state' in states.keys() and torch.cuda.is_available(): torch.cuda.set_rng_state(states['torch_cuda_rand_state'])
+
+    return optimizer, lr_scheduler
