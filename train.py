@@ -15,17 +15,15 @@ def main():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--p', type=float, default=0.95)
-    parser.add_argument('--t', type=float, default=0.2)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--max-samples', type=int, default=1000)
+    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--max-samples', type=int, default=800000)
     parser.add_argument('--total-steps', type=int, default=-1) # optional, specify total training step count
     parser.add_argument('--warmup-steps', type=int, default=5000)
-    parser.add_argument('--save-every', type=int, default=100)
+    parser.add_argument('--save-every', type=int, default=20000)
     parser.add_argument('--ckpt', type=str, default='')
     parser.add_argument('--model_type', choices=['bidirectional','esmlike'], default='bidirectional')
     args = parser.parse_args()
@@ -75,7 +73,8 @@ def main():
         return torch.utils.data.DataLoader(dataset, batch_size=args.bsz)
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.data):
-        train_dataset = data_class(args.data, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples)
+        start_seq = init_step*args.bsz
+        train_dataset = data_class(args.data, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples, start_seq_idx=start_seq)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -95,7 +94,7 @@ def main():
 
     model.train()
 
-    step_count = init_step
+    step_count = init_step + 1
     save_every = args.save_every
     print_every = 1000
     for epoch in range(num_epochs):
@@ -134,7 +133,7 @@ def main():
                     print('step {} loss: {:.5f} (this step {:.5f})'.format(step_count, total_loss / batches, loss.item()))
 
                 # save every N steps
-                if step_count != init_step and step_count % save_every == 0:
+                if step_count % save_every == 0:
                     save_path = os.path.join(args.save, 'train-' + args.model_type + '-step' + str(step_count) + '.pt')
                     torch.save({
                         'step': step_count,

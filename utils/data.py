@@ -7,10 +7,25 @@ from Bio import SeqIO
 from .mask import idx_to_mask_start, rand_mask_start
 
 # FASTA reader
-def fasta_gen(file):
+# on this branch, assume we are always receiving UniRef data
+def fasta_gen(file, start_seq_idx=0):
+    idx = 0
     with open(file) as f:
         for record in SeqIO.parse(f, 'fasta'):
-            yield str(record.seq), None
+            seq = str(record.seq)
+            desc = str(record.description)
+            # reject short seqs, low quality seqs
+            if len(seq) < 18: continue
+            if 'LOW QUALITY PROTEIN' in desc: continue
+            # reject non-representatives; false negative if spaces permitted in ID
+            uniq_id = desc.split(' ', 1)[0][9:]
+            rep_id = desc.rsplit(' ', 1)[1][6:]
+            if uniq_id != rep_id: continue
+            # if this is a valid sequence, iterate until we reach start_seq_idx
+            idx += 1
+            if idx <= start_seq_idx: continue
+            # output
+            yield seq, None
 
 # TSV reader (for UniProt ID mapper output w/ binding sites)
 def tsv_gen(file):
@@ -54,10 +69,10 @@ def tsv_gen(file):
                     yield seq, bind_idx
 
 # select generator from file extension
-def make_gen_from_ext(file):
+def make_gen_from_ext(file, start=0):
     ext = file.split('.')[-1]
     if ext in ['fasta', 'fa']:
-        return fasta_gen(file)
+        return fasta_gen(file, start)
     elif ext == 'tsv':
         return tsv_gen(file)
     else:
@@ -73,7 +88,8 @@ def apply_dropout(idxs, p_drop=0.2):
     return torch.sort(idxs_new[:elems_to_keep]).values
 
 class ProteinBindingData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2, start_seq_idx=0):
+        # start_seq_idx is indexed by order of emission from the generator; usually set to init_step * bsz
         self.max_dim = max_dim
         self.p_drop = p_drop
         # load entire dataset into working memory
@@ -82,7 +98,7 @@ class ProteinBindingData(Dataset):
         self.idxs = []
 
         # get generator
-        gen = make_gen_from_ext(file)
+        gen = make_gen_from_ext(file, start_seq_idx)
 
         # fetch all sequences and binding sites if available
         sample_count = 0
@@ -91,8 +107,6 @@ class ProteinBindingData(Dataset):
             seq = tokenizer.encode(seq).ids
             # add BOS, EOS; see tokenizer.json
             seq = [1] + seq + [2]
-            # drop very short sequences
-            if len(seq) < 20: continue
             # store
             self.seqs.append(torch.tensor(seq))
             self.idxs.append(idx)
@@ -208,7 +222,7 @@ class ProteinBindingOnlyData(Dataset):
 
 # masked LM
 class MaskedProteinData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, start_seq_idx=0):
         # masking stuff
         self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
         self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
@@ -218,7 +232,7 @@ class MaskedProteinData(Dataset):
         self.seqs = []
 
         # get generator
-        gen = make_gen_from_ext(file)
+        gen = make_gen_from_ext(file, start_seq_idx)
 
         # fetch all sequences and binding sites if available
         sample_count = 0
@@ -227,8 +241,6 @@ class MaskedProteinData(Dataset):
             seq = tokenizer.encode(seq).ids
             # add BOS, EOS; see tokenizer.json
             seq = [1] + seq + [2]
-            # drop very short sequences
-            if len(seq) < 20: continue
             # store
             self.seqs.append(torch.tensor(seq))
 
