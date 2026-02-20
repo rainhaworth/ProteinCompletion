@@ -96,7 +96,7 @@ def main():
 
     step_count = init_step + 1
     save_every = args.save_every
-    print_every = 1000
+    print_every = 5000
     for epoch in range(num_epochs):
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
@@ -105,9 +105,11 @@ def main():
                 # put everything on the GPU
                 seqs = seqs.to(device)
                 targets = targets.to(device)
-                if attns is not None:
+                if attns.shape[1] == 0:
+                    attns = None
+                else:
                     attns = attns.to(device)
-                
+
                 with torch.amp.autocast(device.type):
                     logits = model(seqs, attention_mask=attns)
 

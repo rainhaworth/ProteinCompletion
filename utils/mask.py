@@ -26,8 +26,7 @@ def idx_to_segments(idx):
 # generate path randomly choosing from valid steps
 def idx_to_path_targets_valid(idx, seqlen, dim=512):
     path = []
-    targets = np.ones((dim, 2), dtype=int)
-    targets *= -100
+    targets = np.full((dim, 2), -100, dtype=int)
     idx = sorted(idx)
 
     assert idx[0] >= 0
@@ -36,151 +35,90 @@ def idx_to_path_targets_valid(idx, seqlen, dim=512):
     # find initial binding site segments
     segments = idx_to_segments(idx)
 
-    # set first batch of targets
-    for seg in segments:
-        prev = seg[0] - 1
-        next = seg[1] + 1
-        targets[seg[0], 0] = prev if prev != -1 else -100
-        targets[seg[1], 1] = next if next != seqlen else -100
-
     # iterate until we only have one segment covering the whole sequence
     while segments[0][0] != 0 or segments[0][1] != seqlen-1:
-        # get all possible choices
-        choices = []
-        for i, seg in enumerate(segments):
-            if seg[0] > 0:
-                choices.append((seg[0] - 1, i))
-            if seg[1] < seqlen-1:
-                choices.append((seg[1] + 1, i))
-        
-        # select next step, update path
-        cidx = np.random.randint(0, len(choices))
-        step = choices[cidx][0]
-        i = choices[cidx][1]
-        path.append(step)
+        # pick a random segment + direction
+        i = np.random.randint(0, len(segments))
+        direction = np.random.randint(2)
+        pos = segments[i][direction]
+        # enforce bounds
+        if (pos <= 0 and direction == 0) or (pos >= seqlen-1 and direction == 1):
+            direction = 1 - direction
+            pos = segments[i][direction]
+        off = (direction*2) - 1
 
-        # update segments + targets
-        if segments[i][0] - 1 == step:
+        # update targets + path
+        targets[pos, direction] = pos + off # off=-1 -> targets[pos, 0]; off=1 -> targets[pos, 1]
+        # if we already have a target at this location, retroactively predict both targets simultaneously (necessary for masking)
+        if targets[pos, 1 - direction] == -100: path.append(pos) # off=-1 -> targets[pos,1]; off=1 -> targets[pos,0]
+
+        # update segments
+        if off == -1:
             # merge segments if necessary; no new targets because both adjacent amino acids are known
-            if i > 0 and segments[i-1][1] + 1 == step:
+            if i > 0 and segments[i-1][1] - off == pos + off:
                 segments[i] = (segments[i-1][0], segments[i][1])
                 segments.pop(i-1)
             # otherwise expand segment and update targets
             else:
-                segments[i] = (segments[i][0] - 1, segments[i][1])
-                targets[step, 0] = step - 1 if step > 0 else -100
+                segments[i] = (pos + off, segments[i][1])
         else:
             # same as before but opposite direction
-            if i < len(segments)-1 and segments[i+1][0] - 1 == step:
+            if i < len(segments)-1 and segments[i+1][0] - off == pos + off:
                 segments[i] = (segments[i][0], segments[i+1][1])
                 segments.pop(i+1)
             else:
-                segments[i] = (segments[i][0], segments[i][1] + 1)
-                targets[step, 1] = step + 1 if step + 1 < seqlen else -100
+                segments[i] = (segments[i][0], pos + off)
     
-    return path, targets
-
-
-
-# generate path randomly stepping out from largest chunk
-def idx_to_path_targets_largest(idx, seqlen, dim=512):
-    path = []
-    targets = np.ones((dim, 2), dtype=int)
-    targets *= -100
-    idx = sorted(idx)
-
-    assert idx[0] >= 0
-    assert idx[-1] < seqlen
-
-    # find all binding site segments
-    segments = idx_to_segments(idx)
-
-    # find largest segment, use to set next_L and next_R for path
-    max_seg_idx = np.argmax([seg[1] - seg[0] for seg in segments])
-    max_seg = segments[max_seg_idx]
-
-    next_L = max_seg[0] - 1
-    next_R = max_seg[1] + 1
-
-    # set targets for binding site
-    for seg in segments:
-        prev = seg[0] - 1
-        next = seg[1] + 1
-        targets[seg[0], 0] = prev if prev != -1 else -100
-        targets[seg[1], 1] = next if next != seqlen else -100
-
-    # convert idx to set for faster membership checking
-    idx = set(idx)
-
-    # iterate until BOS + EOS
-    while next_L != -1 or next_R != seqlen:
-        # are L and R both valid?
-        choices = []
-        choices.append(next_L) if next_L != -1 else None
-        choices.append(next_R) if next_R != seqlen else None
-
-        # select move, update path
-        step = np.random.choice(choices)
-        path.append(step)
-        idx.add(step)
-
-        # if we picked next_L, update next_L
-        if step == next_L:
-            next_L -= 1
-            # check for collisions
-            if next_L in idx:
-                # assume we have few enough segments that binary search isn't worth doing
-                for seg in segments:
-                    # next_L should collide with the end of a segment
-                    if next_L == seg[1]:
-                        next_L = seg[0] - 1
-                        break
-        # otherwise, update next_R
-        else:
-            next_R += 1
-            # check for collisions in opposite direction
-            if next_R in idx:
-                for seg in segments:
-                    if next_R == seg[0]:
-                        next_R = seg[1] + 1
-        
-        # update targets
-        targets[step, 0] = step - 1 if step - 1 != -1 else -100
-        targets[step, 1] = step + 1 if step + 1 != seqlen else -100
-    
-    #full_idxs = np.arange(seqlen)
-    #targets[full_idxs[1:], 0] = full_idxs[:-1]
-    #targets[full_idxs[:-1], 1] = full_idxs[1:]
-
     return path, targets
 
 # from path, i.e. sequence of indices representing steps, and indices of known monomers, generate mask
-def path_to_mask(path, idx, dim=512):
-    mask = np.zeros((dim, dim), dtype=int)
+def path_to_mask(path, targets, idx, dim=512):
+    mask = np.zeros((dim, dim), dtype=np.uint8)
 
     # for each index in original binding site, unmask the entire column
-    mask[:len(path)+len(idx), idx] = 1
+    mask[:len(targets), idx] = 1
 
-    # construct mask
-    for path_idx, step in enumerate(path):
-        # for this step + all later path steps, add on the current step
-        populated_idxs = path[path_idx:]
-        mask[populated_idxs, step] = 1
+    # fast version, only 2 vectorized updates
+    path = np.array(path, dtype=int)
+    tp = targets[path,:]
+    tp_max = tp.max(1)
+    tp_min = tp.min(1)
+    # populate upper left triangle
+    mask[path[::-1][:,None], tp_max[None,:]] = np.tri(len(path),k=-1,dtype=int)[::-1,:]
+    # cleanup: for each step in the path with 2 targets, we missed a column
+    ti = np.nonzero(tp_min != -100)[0]
+    if len(ti) > 0: mask[:, tp_min[ti]] = mask[:, tp_max[ti]]
 
+    # simple version
+    """
+    path = np.array(path, dtype=int)
+    for i in range(len(path)-1):
+        # for all future steps in path, reveal current targets
+        to_pop = path[i+1:]
+        for t in targets[path[i]]:
+            if t == -100: continue
+            mask[to_pop, t] = 1"""
+    
+    # iterative version (use if reimplementing in compiled language)
+    """
+    for i in range(len(path)-1):
+        for j in range(i+1, len(path)):
+            for t in targets[path[i]]:
+                if t == -100: continue
+                mask[path[j], t] = 1
+    """
     return mask
 
 # from known indices and sequence length, generate mask and return binding site start position
 # new: also generate targets
-def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_largest):
+def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_valid):
     assert 0 < len(idx) <= seqlen
     assert seqlen <= dim
     
     path, targets = pathfn(idx, seqlen, dim)
-    mask = path_to_mask(path, idx, dim)
+    mask = path_to_mask(path, targets, idx, dim)
 
-    # TODO: min(idx) is not the offset we should be using anymore, fix later
-    #       for now, we don't even use offset, so leave it
-    return mask, 0, targets
+    return mask, targets
 
 # generate random path through sequence of known length
 # just_binding arg: skip making the mask, just return the binding site
