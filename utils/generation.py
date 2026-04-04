@@ -145,3 +145,72 @@ def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sam
     _, new_token = sample_fn(logits[None,:])
 
     return new_token, new_pos
+
+# new experimental generation for ATP
+def gen_step_atp(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=True):
+    # get segments; use copy of idxs so we don't have weird memory issues
+    segments = idx_to_segments(idxs.detach().clone())
+
+    # get PTP/NTP indices
+    p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] not in [BOS_ID, BOS_ID+2]]
+    n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] not in [EOS_ID, EOS_ID+2]]
+
+    # if not predicting terminals, assume fixed window like ESM
+    if not predict_terminals:
+        if len(p_idxs) > 0 and p_idxs[0] == 0: p_idxs.pop(0)
+        if len(n_idxs) > 0 and n_idxs[-1] == seq.size(1) - 1: n_idxs.pop(-1)
+
+    # stop inference if we have no valid steps
+    if len(n_idxs) == 0 and len(p_idxs) == 0: return None, None
+
+    # make mask, call model, squeeze batch dim to make life easier
+    mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
+    logits = model(seq, attention_mask=mask)
+    logits = torch.squeeze(logits, 0)
+
+    # get PTP/NTP logits
+    half_sz = logits.size(-1) // 2
+    p_logits = logits[p_idxs,:half_sz]
+    n_logits = logits[n_idxs,half_sz:]
+
+    # apply repetition penalties; can probably do this faster but with window=4 it's fine
+    """
+    p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
+    n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
+    penalties = torch.ones_like(logits)
+    for i, pens in enumerate(p_penalties + n_penalties):
+        for p in pens:
+            penalties[i, p] = rp
+    logits = logits / penalties"""
+
+    # try both sets of logits
+    min_ent_pos = [None,None]
+    for i, logits in enumerate([n_logits, p_logits]):
+        if logits.size(0) == 0: continue
+        # make + apply logit mask so we don't generate invalid tokens
+        drop_val = -1e9
+        mask = torch.zeros_like(logits)
+        mask[:,invalid_ids] = drop_val
+        logits += mask
+
+        entropy = torch.distributions.Categorical(logits=logits.log_softmax(-1)).entropy()
+        min_ent_pos[i] = (torch.argmin(entropy), torch.min(entropy))
+
+    if min_ent_pos[1] is None or (min_ent_pos[0] is not None and min_ent_pos[0][1] < min_ent_pos[1][1]):
+        best_logits = n_logits
+        new_i = min_ent_pos[0][0]
+        new_pos = n_idxs[new_i] + 1
+    else:
+        best_logits = p_logits
+        new_i = min_ent_pos[1][0]
+        new_pos = p_idxs[new_i] - 1
+
+    # softmax
+    logits_softmax = torch.nn.functional.softmax(best_logits, -1)
+
+    if return_logits: return logits_softmax, None
+
+    # sample next step (index, token) from logits
+    _, new_token = sample_fn(logits_softmax[None,new_i,:])
+
+    return new_token, new_pos
