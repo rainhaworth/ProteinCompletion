@@ -168,15 +168,9 @@ def main():
                             print('idxs', idxs)
                             break
 
-                        # temporary test: what do the logits look like at new_pos?
-                        logits, _ = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False, return_logits=True)
-                        max_s += torch.max(logits).detach().cpu()
-
                         # update seq and idxs
                         seq[:,new_pos] = new_token[None,None]
                         idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
-
-                    print('mean max logit:', max_s / gen_steps)
 
                     seq_str = tokenizer.decode(seq.squeeze().numpy(force=True))
                     print(seq_str)
