@@ -1,5 +1,6 @@
 # methods to generate flexible causal masks from sequences
 import numpy as np
+from time import time
 
 # helper function: convert list of indices to list of contiguous segments
 # represented as list of tuples (start, end)
@@ -136,3 +137,71 @@ def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2, just_binding=False):
 
     # get mask and start position
     return idx_to_mask_start(idx, seqlen, dim)
+
+
+# leakage-free idea 1: perform all possible generation steps at each time step
+# kinda looks like towers of hanoi
+# also skip the path since it's deterministic, just generate mask
+def idx_to_mask_targets_hanoi(idx, seqlen, dim=512):
+    assert 0 < len(idx) <= seqlen
+    assert seqlen <= dim
+
+    targets = np.full((dim, 2), -100, dtype=int)
+    mask = np.zeros((dim, dim), dtype=np.uint8)
+    mask[:len(targets), idx] = 1
+    
+    idx = sorted(idx)
+
+    assert idx[0] >= 0
+    assert idx[-1] < seqlen
+
+    # find initial motif segments
+    segments = idx_to_segments(idx)
+    visited = set(idx)
+
+    # iterate until we only have one segment covering the whole sequence
+    while segments[0][0] != 0 or segments[0][1] != seqlen-1:
+        # get all NTP and PTP targets
+        n_pos_s = [segments[i][1] for i in range(len(segments))]
+        p_pos_s = [segments[i][0] for i in range(len(segments))]
+
+        # enforce bounds
+        if n_pos_s[-1] >= seqlen-1: n_pos_s = n_pos_s[:-1]
+        if p_pos_s[0] <= 0: p_pos_s = p_pos_s[1:]
+
+        # update targets; this should work even when one is empty
+        gen_n = np.array(n_pos_s)+1
+        gen_p = np.array(p_pos_s)-1
+        targets[n_pos_s, 1] = gen_n
+        targets[p_pos_s, 0] = gen_p
+
+        # update mask; best to work 1 step ahead or we lose non-visited generation targets
+        gen = set(list(gen_n) + list(gen_p))
+        visited = visited.union(gen)
+        mask[list(gen),:] = [i in visited for i in range(dim)]
+
+        # update segments
+        i = 0
+        while i < len(segments):
+            # increment in both directions
+            segments[i] = (max(segments[i][0]-1, 0), min(segments[i][1]+1, seqlen-1))
+            # merge when segments meet
+            if i > 0 and segments[i][0] - segments[i-1][1] <= 1:
+                segments[i] = (segments[i-1][0], segments[i][1])
+                segments.pop(i-1)
+            else:
+                i += 1
+
+    return mask, targets
+
+def profile_path_mask(idx, seqlen, dim=512, pathfn=idx_to_path_targets_valid):
+    assert 0 < len(idx) <= seqlen
+    assert seqlen <= dim
+    
+    t0 = time()
+    path, targets = pathfn(idx, seqlen, dim)
+    t1 = time()
+    mask = path_to_mask(path, targets, idx, dim)
+    t2 = time()
+
+    return t1-t0, t2-t1
