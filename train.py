@@ -2,11 +2,12 @@
 import os
 import argparse
 import torch
+import numpy as np
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import ProteinBindingData, MaskedProteinData
-from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_compat, get_scheduler
+from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_model_compat, load_train_config
 
 def main():
     parser = argparse.ArgumentParser()
@@ -14,17 +15,17 @@ def main():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--p', type=float, default=0.95)
-    parser.add_argument('--t', type=float, default=0.2)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--max-samples', type=int, default=1000)
-    parser.add_argument('--save-every', type=int, default=100000)
+    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--max-samples', type=int, default=800000)
+    parser.add_argument('--total-steps', type=int, default=1250000) # optional, specify total training step count
+    parser.add_argument('--warmup-steps', type=int, default=10000)
+    parser.add_argument('--save-every', type=int, default=20000)
     parser.add_argument('--ckpt', type=str, default='')
-    parser.add_argument('--model_type', choices=['bidirectional','esmlike'], default='bidirectional')
+    parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     args = parser.parse_args()
 
     set_env()
@@ -36,8 +37,8 @@ def main():
 
     device = torch.device(args.device)
     configf = f'./{args.config}.json'
-    ckpt = args.ckpt
-    if args.model_type == 'bidirectional':
+    checkpoint = args.ckpt
+    if args.model_type == 'atp':
         model_class = BidirectionalCausalLM
         data_class = ProteinBindingData
     else:
@@ -47,11 +48,20 @@ def main():
     if device.type == 'cpu':
         print('falling back to fp32')
         args.fp16 = False
+        
+    # load checkpoint if provided
+    if checkpoint != '' and os.path.exists(checkpoint):
+        with print_time('loading checkpoint data from ' + checkpoint):
+            states = torch.load(checkpoint, map_location='cpu', weights_only=False)
+            init_step = states['step']
+    else:
+        states = None
+        init_step = 0
 
     # load model, parameters, tokenizer
 
-    with print_time('loading parameters'):
-        model, optimizer, start_step = load_compat(model_class, configf, device, ckpt, training=True)
+    with print_time('loading model'):
+        model = load_model_compat(model_class, configf, device, states)
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
@@ -60,10 +70,11 @@ def main():
     
     # helper function; keep it small and simple for now
     def make_dataloader(dataset):
-        return torch.utils.data.DataLoader(dataset, batch_size=args.bsz)
+        return torch.utils.data.DataLoader(dataset, num_workers=2, pin_memory=True, batch_size=args.bsz)
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.data):
-        train_dataset = data_class(args.data, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples)
+        start_seq = init_step*args.bsz
+        train_dataset = data_class(args.data, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples, start_seq_idx=start_seq)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -71,9 +82,10 @@ def main():
     # configure training
 
     num_epochs = args.epochs
-    num_training_steps = num_epochs * len(train_dataloader)
+    if args.total_steps != -1: num_training_steps = args.total_steps
+    else: num_training_steps = num_epochs * len(train_dataloader)
 
-    lr_scheduler = get_scheduler(optimizer, 5000, num_training_steps)
+    optimizer, lr_scheduler = load_train_config(model, args.warmup_steps, num_training_steps, states)
 
     loss_fn = torch.nn.CrossEntropyLoss()
     scaler = torch.GradScaler(device.type)
@@ -82,26 +94,22 @@ def main():
 
     model.train()
 
-    step_count = 0
+    step_count = init_step + 1
     save_every = args.save_every
-    print_every = 1000
+    print_every = save_every//2
     for epoch in range(num_epochs):
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
             batches = 0
             for seqs, targets, attns in train_dataloader:
-                # resume from step
-                if step_count < start_step:
-                    step_count += 1
-                    lr_scheduler.step()
-                    continue
-
                 # put everything on the GPU
                 seqs = seqs.to(device)
                 targets = targets.to(device)
-                if attns is not None:
+                if attns.shape[1] == 0:
+                    attns = None
+                else:
                     attns = attns.to(device)
-                
+
                 with torch.amp.autocast(device.type):
                     logits = model(seqs, attention_mask=attns)
 
@@ -127,12 +135,16 @@ def main():
                     print('step {} loss: {:.5f} (this step {:.5f})'.format(step_count, total_loss / batches, loss.item()))
 
                 # save every N steps
-                if step_count != start_step and step_count % save_every == 0:
+                if step_count % save_every == 0:
                     save_path = os.path.join(args.save, 'train-' + args.model_type + '-step' + str(step_count) + '.pt')
                     torch.save({
                         'step': step_count,
                         'model_state': model.state_dict(),
-                        'optim_state': optimizer.state_dict()
+                        'optim_state': optimizer.state_dict(),
+                        'scheduler_state': lr_scheduler.state_dict(),
+                        'np_rand_state': np.random.get_state(),
+                        'torch_rand_state': torch.get_rng_state(),
+                        'torch_cuda_rand_state': torch.cuda.get_rng_state() if torch.cuda.is_available() else None
                     }, save_path)
                     print('saved to', save_path)
                 step_count += 1

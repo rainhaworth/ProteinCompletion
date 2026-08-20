@@ -2,15 +2,17 @@
 import numpy as np
 import argparse
 import torch
+import os
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import make_gen_from_ext
-from utils.utils import print_time, set_env, set_seed, load_compat, create_tokenizer_custom
-from utils.generation import gen_step_bidirectional, gen_step_esmlike, make_inference_mask
+from utils.utils import print_time, set_env, set_seed, load_model_compat, create_tokenizer_custom
+from utils.generation import gen_step_bidirectional, gen_step_esmlike, make_inference_mask, gen_step_atp
 
 from tqdm import tqdm
-
+from collections import Counter
+import time
 
 PAD_ID = 0
 BOS_ID = 1
@@ -43,6 +45,7 @@ def seq_entropy(seq : str, ignore_idxs):
     freqs = {c: 0 for c in VALID_AAS}
     for i, c in enumerate(seq):
         if i in idxs: continue
+        if c not in freqs.keys(): continue
         freqs[c] += 1
     freqs = np.array(list(freqs.values()), dtype=float)
     freqs = freqs[freqs != 0]
@@ -66,13 +69,14 @@ def main():
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
     parser.add_argument('--max-window', type=int, default=-1)
     parser.add_argument('--config', type=str, default='./config-medium.json')
-    parser.add_argument('--model_type', choices=['bidirectional','esmlike'], default='bidirectional')
+    parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     parser.add_argument('--output', default='./out.tsv')
+    parser.add_argument('--id', action='store_true')
     args = parser.parse_args()
 
-    if args.model_type == 'bidirectional':
+    if args.model_type == 'atp':
         model_class = BidirectionalCausalLM
-        gen_step = gen_step_bidirectional
+        gen_step = gen_step_atp#gen_step_bidirectional
         ce_fn = cross_entropy_2way
     else:
         model_class = ESMlikeLM
@@ -94,8 +98,20 @@ def main():
 
     # load everything
 
+    # load checkpoint if provided
+    checkpoint = args.weights
+    if checkpoint != '' and os.path.exists(checkpoint):
+        with print_time('loading checkpoint data from ' + checkpoint):
+            states = torch.load(checkpoint, map_location='cpu', weights_only=False)
+            
+            if not args.id: init_step = states['step'] * 8 # TODO: need training batch size, prob don't hardcode
+            else: init_step = 0
+    else:
+        states = None
+        init_step = 0
+
     with print_time('loading model'):
-        model = load_compat(model_class, args.config, device, args.weights, training=False)
+        model = load_model_compat(model_class, args.config, device, states)
 
 
     with print_time('loading tokenizer'):
@@ -107,7 +123,7 @@ def main():
         invalid_ids = [x for x in range(32) if x not in valid_ids]
 
     with print_time('loading datasets'):
-        dataset = make_gen_from_ext(args.data)
+        dataset = make_gen_from_ext(args.data, init_step)
 
     # run eval
     
@@ -118,11 +134,11 @@ def main():
     with print_time('evaluating'), open(args.output, 'w') as outf:
         outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
         prev_seq = None
-        for seq, _ in dataset:
+        
+	for seq, _ in dataset:
             if seq == prev_seq: continue
-            if len(seq) < 100 or len(seq) > 5000: continue
+            if len(seq) < 100 or len(seq) > 1000: continue
 
-            print('seq:', seq)
             prev_seq = seq
 
             # 2 problem settings: contiguous + fragmented subseq
@@ -144,9 +160,9 @@ def main():
                     idxs = torch.tensor(keep_idx).to(device)
                     
                     # generate
-                    # TODO: constrain to fill in the middle if non contiguous
+                    # TODO: unit test to confirm no corner cases where some residues are not generated
                     gen_steps = len(prev_seq) - keep_sz
-                    for gs in tqdm(range(gen_steps)):
+                    for gs in range(gen_steps): # removed tqdm
                         # generate next token
                         new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False)
                         if new_token == None:
@@ -160,6 +176,7 @@ def main():
                         idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
 
                     seq_str = tokenizer.decode(seq.squeeze().numpy(force=True))
+                    print(seq_str)
                     outf.write('{:.2f}\t{}\t{}\t{:.2f}\t{}\t{}\n'.format(
                         (1-keep_frac)*100,
                         contiguous,

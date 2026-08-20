@@ -4,10 +4,30 @@ import csv
 import numpy as np
 from Bio import SeqIO
 
-from .mask import idx_to_mask_start, rand_mask_start
+from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi
 
 # FASTA reader
-def fasta_gen(file):
+# on this branch, assume we are always receiving UniRef data
+def fasta_gen(file, start_seq_idx=0):
+    idx = 0
+    with open(file) as f:
+        for record in SeqIO.parse(f, 'fasta'):
+            seq = str(record.seq)
+            desc = str(record.description)
+            # reject short seqs, low quality seqs
+            if len(seq) < 18: continue
+            if 'LOW QUALITY PROTEIN' in desc: continue
+            # reject non-representatives; false negative if spaces permitted in ID
+            uniq_id = desc.split(' ', 1)[0][9:]
+            rep_id = desc.rsplit(' ', 1)[1][6:]
+            if uniq_id != rep_id: continue
+            # if this is a valid sequence, iterate until we reach start_seq_idx
+            idx += 1
+            if idx <= start_seq_idx: continue
+            # output
+            yield seq, None
+
+def fasta_gen_basic(file, start_seq_idx=None):
     with open(file) as f:
         for record in SeqIO.parse(f, 'fasta'):
             yield str(record.seq), None
@@ -54,10 +74,10 @@ def tsv_gen(file):
                     yield seq, bind_idx
 
 # select generator from file extension
-def make_gen_from_ext(file):
+def make_gen_from_ext(file, start=0):
     ext = file.split('.')[-1]
     if ext in ['fasta', 'fa']:
-        return fasta_gen(file)
+        return fasta_gen(file, start)
     elif ext == 'tsv':
         return tsv_gen(file)
     else:
@@ -73,26 +93,39 @@ def apply_dropout(idxs, p_drop=0.2):
     return torch.sort(idxs_new[:elems_to_keep]).values
 
 class ProteinBindingData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2, start_seq_idx=0):
+        # start_seq_idx is indexed by order of emission from the generator; usually set to init_step * bsz
         self.max_dim = max_dim
         self.p_drop = p_drop
-        # load entire dataset into working memory
-        # if you want to use a big dataset rewrite as iterable
+        # load all data into working memory
         self.seqs = []
         self.idxs = []
 
+        # masking stuff
+        self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
+        self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
+
         # get generator
-        gen = make_gen_from_ext(file)
+        gen = make_gen_from_ext(file, start_seq_idx)
 
         # fetch all sequences and binding sites if available
         sample_count = 0
         for seq, idx in gen:
+            # append EOS + BOS markers
+            seq = '1' + seq + '2'
+            # for long sequences, take random subsequence; best to do this now to avoid unnecessary processing
+            if len(seq) > max_dim:
+                min_idx = 0
+                max_idx = len(seq) - self.max_dim
+                offset = np.random.randint(min_idx, max_idx)
+                # update seq
+                seq = seq[offset : offset + self.max_dim]
+                # TODO: handle idxs; for uniref we don't use them
             # tokenize
             seq = tokenizer.encode(seq).ids
-            # add BOS, EOS; see tokenizer.json
-            seq = [1] + seq + [2]
-            # drop very short sequences
-            if len(seq) < 20: continue
+            # convert to proper BOS/EOS tokens; see tokenizer.json
+            if seq[0] == 3: seq[0] = 1
+            if seq[-1] == 4: seq[-1] = 2
             # store
             self.seqs.append(torch.tensor(seq))
             self.idxs.append(idx)
@@ -109,46 +142,36 @@ class ProteinBindingData(Dataset):
         seq = self.seqs[idx]
         idxs = self.idxs[idx]
 
-        # if sequence is bigger than max_dim, take random subsequence
-        offset = 0
-        if len(seq) > self.max_dim:
-            min_idx = 0
-            max_idx = len(seq) - self.max_dim
-            # restrict to contain binding site if known
-            if idxs is not None:
-                # hopefully binding site is small enough to fit in the subseq
-                if idxs[-1] - idxs[0] < self.max_dim:
-                    min_idx = max(0, idxs[-1].item() - self.max_dim)
-                    max_idx = min(max_idx, idxs[0].item())
-                # if not, just get a chunk of it
-                else:
-                    min_idx = idxs[0].item()
-                    max_idx = idxs[-1].item() - self.max_dim
-                    # avoid breaking randint
-                    if min_idx == max_idx:
-                        max_idx += 1
-            # compute offset
-            offset = np.random.randint(min_idx, max_idx)
-            # update seq
-            seq = seq[offset : offset + self.max_dim]
-
         # generate random path -> mask + targets
         # for now, pad everything to max_dim
         if idxs is not None:
-            # apply offset (if applicable) and dropout
-            idxs -= offset
+            # apply dropout
             idxs_drop = apply_dropout(idxs, self.p_drop)
             # generate
-            attn, offset, targets = idx_to_mask_start(idxs_drop, len(seq), self.max_dim)
+            attn, targets = idx_to_mask_targets_hanoi(idxs_drop, len(seq), self.max_dim)
         else:
-            attn, offset, targets = rand_mask_start(len(seq), self.max_dim, p_drop=self.p_drop)
+            # compute number of positions allocated to binding site
+            choice = self.uniform.sample()
+            if choice > 0.8:
+                frac = self.uniform.sample()
+            else:
+                frac = self.beta.sample()
+            n_mask = (len(seq) * frac).int()
+
+            # ensure we have at least 1 known position and at least 1 unknown position
+            n_mask = max(min(n_mask, len(seq) - 1), 1)
+
+            # make random motif
+            rand_idx = torch.randperm(len(seq))[:n_mask]
+
+            attn, targets = idx_to_mask_targets_hanoi(rand_idx, len(seq), self.max_dim)
 
         # pad sequence
         if len(seq) < self.max_dim:
             seq = torch.cat(( seq, torch.zeros(self.max_dim - len(seq)) )).to(int)
 
         # convert targets from indices to token ids
-        targets = torch.tensor(targets)
+        targets = torch.tensor(targets, dtype=int)
         targets = torch.where(targets >= 0, seq[targets], targets)
 
         # unified training data format: inputs, targets, attns
@@ -208,7 +231,7 @@ class ProteinBindingOnlyData(Dataset):
 
 # masked LM
 class MaskedProteinData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, start_seq_idx=0):
         # masking stuff
         self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
         self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
@@ -218,17 +241,25 @@ class MaskedProteinData(Dataset):
         self.seqs = []
 
         # get generator
-        gen = make_gen_from_ext(file)
+        gen = make_gen_from_ext(file, start_seq_idx)
 
-        # fetch all sequences and binding sites if available
+        # copy-pasted from ProteinBindingData
         sample_count = 0
-        for seq, idx in gen:
+        for seq, _ in gen:
+            # append EOS + BOS markers
+            seq = '1' + seq + '2'
+            # for long sequences, take random subsequence; best to do this now to avoid unnecessary processing
+            if len(seq) > max_dim:
+                min_idx = 0
+                max_idx = len(seq) - self.max_dim
+                offset = np.random.randint(min_idx, max_idx)
+                # update seq
+                seq = seq[offset : offset + self.max_dim]
             # tokenize
             seq = tokenizer.encode(seq).ids
-            # add BOS, EOS; see tokenizer.json
-            seq = [1] + seq + [2]
-            # drop very short sequences
-            if len(seq) < 20: continue
+            # convert to proper BOS/EOS tokens; see tokenizer.json
+            if seq[0] == 3: seq[0] = 1
+            if seq[-1] == 4: seq[-1] = 2
             # store
             self.seqs.append(torch.tensor(seq))
 
@@ -279,4 +310,4 @@ class MaskedProteinData(Dataset):
             seq_mask = torch.cat(( seq_mask, torch.zeros(self.max_dim - len(seq_mask)) )).to(int)
 
         # unified training data format: inputs, targets, attns
-        return seq_mask, seq_tgt, None
+        return seq_mask, seq_tgt, torch.tensor([])
