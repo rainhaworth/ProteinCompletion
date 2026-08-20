@@ -10,10 +10,9 @@ warnings.filterwarnings("ignore", message="Entity ID not found in metadata")
 
 # Config
 model_id = "esm3-medium-2024-08"
-api_key = "37A0K29vxdcHHgZ9thfQao"
-# api_key  = os.getenv("ESM_API_KEY")
-# if not api_key:
-#     raise RuntimeError("ESM_API_KEY not set")
+api_key = os.getenv("ESM_API_KEY")
+if not api_key:
+    raise RuntimeError("ESM_API_KEY not set")
 
 tsv_path = Path("bidirectional-comp.tsv")
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

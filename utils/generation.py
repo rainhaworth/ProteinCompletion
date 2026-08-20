@@ -6,6 +6,7 @@ from .mask import idx_to_segments
 PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
+MASK_ID = 3
 
 # from sequence + list of valid indices, generate mask for inference
 def make_inference_mask(seqlen, idx, device, dim=512):
@@ -20,6 +21,16 @@ def make_inference_mask(seqlen, idx, device, dim=512):
 
     # add batch dim
     return mask[None,:,:]
+
+
+def make_mlm_input(seq, idxs, mask_id=MASK_ID):
+    """Return an MLM input containing no unrevealed true token values."""
+    model_input = seq.clone()
+    known = torch.zeros(seq.size(-1), dtype=torch.bool, device=seq.device)
+    known_idx = torch.as_tensor(idxs, dtype=torch.long, device=seq.device).reshape(-1)
+    known[known_idx] = True
+    model_input[:, ~known] = mask_id
+    return model_input
 
 # greedy sampling: find best logit and return corresponding position + token
 def greedy_sample(logits):
@@ -119,9 +130,10 @@ def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sam
     # stop generation if we run out of positions to predict
     if len(idxs) == seq.size(1): return None, None
 
-    # get logits (L,V)
-    mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
-    logits = model(seq, attention_mask=mask)
+    # Match MLM training by masking unknown inputs and retaining bidirectional
+    # attention. The ATP inference mask was not used during MLM training.
+    model_input = make_mlm_input(seq, idxs)
+    logits = model(model_input, attention_mask=None)
     logits = torch.squeeze(logits, 0)
 
     # mask invalid
