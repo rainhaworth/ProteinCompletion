@@ -45,6 +45,7 @@ def seq_entropy(seq : str, ignore_idxs):
     freqs = {c: 0 for c in VALID_AAS}
     for i, c in enumerate(seq):
         if i in idxs: continue
+        if c not in freqs.keys(): continue
         freqs[c] += 1
     freqs = np.array(list(freqs.values()), dtype=float)
     freqs = freqs[freqs != 0]
@@ -70,6 +71,7 @@ def main():
     parser.add_argument('--config', type=str, default='./config-medium.json')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     parser.add_argument('--output', default='./out.tsv')
+    parser.add_argument('--id', action='store_true')
     args = parser.parse_args()
 
     if args.model_type == 'atp':
@@ -101,7 +103,9 @@ def main():
     if checkpoint != '' and os.path.exists(checkpoint):
         with print_time('loading checkpoint data from ' + checkpoint):
             states = torch.load(checkpoint, map_location='cpu', weights_only=False)
-            init_step = states['step'] * 8 # TODO: need training batch size, prob don't hardcode
+            
+            if not args.id: init_step = states['step'] * 8 # TODO: need training batch size, prob don't hardcode
+            else: init_step = 0
     else:
         states = None
         init_step = 0
@@ -130,13 +134,12 @@ def main():
     with print_time('evaluating'), open(args.output, 'w') as outf:
         outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
         prev_seq = None
-        for seq, _ in dataset:
+        
+	for seq, _ in dataset:
             if seq == prev_seq: continue
-            if len(seq) < 100 or len(seq) > 5000: continue
+            if len(seq) < 100 or len(seq) > 1000: continue
 
-            print('seq:', seq)
             prev_seq = seq
-            print(Counter(seq))
 
             # 2 problem settings: contiguous + fragmented subseq
             for contiguous in [False,True]:
@@ -157,7 +160,7 @@ def main():
                     idxs = torch.tensor(keep_idx).to(device)
                     
                     # generate
-                    # TODO: constrain to fill in the middle if non contiguous
+                    # TODO: unit test to confirm no corner cases where some residues are not generated
                     gen_steps = len(prev_seq) - keep_sz
                     for gs in range(gen_steps): # removed tqdm
                         # generate next token
@@ -168,15 +171,9 @@ def main():
                             print('idxs', idxs)
                             break
 
-                        # temporary test: what do the logits look like at new_pos?
-                        logits, _ = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False, return_logits=True)
-                        max_s += torch.max(logits).detach().cpu()
-
                         # update seq and idxs
                         seq[:,new_pos] = new_token[None,None]
                         idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
-
-                    print('mean max logit:', max_s / gen_steps)
 
                     seq_str = tokenizer.decode(seq.squeeze().numpy(force=True))
                     print(seq_str)

@@ -4,7 +4,7 @@ import csv
 import numpy as np
 from Bio import SeqIO
 
-from .mask import idx_to_mask_start, rand_mask_start
+from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi
 
 # FASTA reader
 # on this branch, assume we are always receiving UniRef data
@@ -26,6 +26,11 @@ def fasta_gen(file, start_seq_idx=0):
             if idx <= start_seq_idx: continue
             # output
             yield seq, None
+
+def fasta_gen_basic(file, start_seq_idx=None):
+    with open(file) as f:
+        for record in SeqIO.parse(f, 'fasta'):
+            yield str(record.seq), None
 
 # TSV reader (for UniProt ID mapper output w/ binding sites)
 def tsv_gen(file):
@@ -143,7 +148,7 @@ class ProteinBindingData(Dataset):
             # apply dropout
             idxs_drop = apply_dropout(idxs, self.p_drop)
             # generate
-            attn, targets = idx_to_mask_start(idxs_drop, len(seq), self.max_dim)
+            attn, targets = idx_to_mask_targets_hanoi(idxs_drop, len(seq), self.max_dim)
         else:
             # compute number of positions allocated to binding site
             choice = self.uniform.sample()
@@ -159,7 +164,7 @@ class ProteinBindingData(Dataset):
             # make random motif
             rand_idx = torch.randperm(len(seq))[:n_mask]
 
-            attn, targets = idx_to_mask_start(rand_idx, len(seq), self.max_dim)
+            attn, targets = idx_to_mask_targets_hanoi(rand_idx, len(seq), self.max_dim)
 
         # pad sequence
         if len(seq) < self.max_dim:

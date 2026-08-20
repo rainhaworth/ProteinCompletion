@@ -1,6 +1,6 @@
 # generation utils
 import torch
-from utils.mask import idx_to_segments
+from .mask import idx_to_segments
 
 # TODO: specify these in config, streamline generation functions
 PAD_ID = 0
