@@ -135,7 +135,7 @@ def main():
         outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
         prev_seq = None
         
-	for seq, _ in dataset:
+        for seq, _ in dataset:
             if seq == prev_seq: continue
             if len(seq) < 100 or len(seq) > 1000: continue
 

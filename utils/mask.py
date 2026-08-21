@@ -146,11 +146,12 @@ def idx_to_mask_targets_hanoi(idx, seqlen, dim=512):
     assert 0 < len(idx) <= seqlen
     assert seqlen <= dim
 
+    # Normalize scalar tensors/NumPy values before set membership checks.
+    idx = sorted(int(i) for i in idx)
+
     targets = np.full((dim, 2), -100, dtype=int)
     mask = np.zeros((dim, dim), dtype=np.uint8)
     mask[:len(targets), idx] = 1
-    
-    idx = sorted(idx)
 
     assert idx[0] >= 0
     assert idx[-1] < seqlen
