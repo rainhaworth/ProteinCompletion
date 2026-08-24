@@ -3,6 +3,7 @@ import os
 import argparse
 import torch
 import numpy as np
+import time
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
@@ -88,7 +89,8 @@ def main():
     optimizer, lr_scheduler = load_train_config(model, args.warmup_steps, num_training_steps, states)
 
     loss_fn = torch.nn.CrossEntropyLoss()
-    scaler = torch.GradScaler(device.type)
+
+    model.compile()
 
     # train
 
@@ -102,6 +104,7 @@ def main():
             total_loss = 0
             batches = 0
             for seqs, targets, attns in train_dataloader:
+                t0 = time.time()
                 # put everything on the GPU
                 seqs = seqs.to(device)
                 targets = targets.to(device)
@@ -110,26 +113,22 @@ def main():
                 else:
                     attns = attns.to(device)
 
-                with torch.amp.autocast(device.type):
+                with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16): # using ampere gpu; otherwise set to fp16 and use gradient scaling
                     logits = model(seqs, attention_mask=attns)
-
-                    # squish logits + targets, compute loss
                     loss = loss_fn(logits.view(-1, model.config.vocab_size), targets.view(-1))
-                scaler.scale(loss).backward()
-
-                # unscale then apply gradient clipping
-                scaler.unscale_(optimizer)
+                
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 
                 # print + update loss; if you want the full loss curve over the epoch, remove `end='\r'`
                 total_loss += loss.item()
                 batches += 1
-                print('loss: {:.5f}'.format(total_loss / batches), end='\r')
+                def get_free_pct(meminfo):
+                    return '{:.2f}%'.format(100 * meminfo[0] / meminfo[1])
+                print('loss: {:.5f}\t{}\t{}'.format(total_loss / batches, get_free_pct(torch.cuda.mem_get_info(device)), time.time() - t0), end='\r')
 
                 if step_count % print_every == 0:
                     print('step {} loss: {:.5f} (this step {:.5f})'.format(step_count, total_loss / batches, loss.item()))

@@ -18,7 +18,7 @@ class BaseConfig:
         initializer_range=0.02,
         scale_attn_weights=True,
         gradient_checkpointing=False,
-        use_cache=True,
+        use_cache=False,
         bos_token_id=50256,
         eos_token_id=50256
     ):
