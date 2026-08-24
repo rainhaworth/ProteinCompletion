@@ -1,7 +1,7 @@
 {
-    "n_layer": 30,
-    "n_embd": 1024,
-    "n_head": 16,
+    "n_layer": 17,
+    "n_embd": 512,
+    "n_head": 8,
     "n_positions": 1024,
     "n_ctx": 1024,
     "vocab_size": 32,
