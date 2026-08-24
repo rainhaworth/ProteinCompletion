@@ -4,7 +4,7 @@ import csv
 import numpy as np
 from Bio import SeqIO
 
-from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi
+from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi, diag_block_mask
 
 # FASTA reader
 # on this branch, assume we are always receiving UniRef data
@@ -91,6 +91,59 @@ def apply_dropout(idxs, p_drop=0.2):
     elems_to_keep = max(len(idxs) - elems_to_drop, 1)
     idxs_new = idxs[torch.randperm(len(idxs))]
     return torch.sort(idxs_new[:elems_to_keep]).values
+
+class PackedUnirefData(Dataset):
+    def __init__(self, file, tokenizer=None, max_dim=512, max_samples=None, p_drop=None, start_seq_idx=None):
+        # all none arguments are unused, only present to avoid breaking anything
+        self.max_dim = max_dim
+        self.data_path = file
+        # masking stuff
+        self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
+        self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
+        # for memmap memory management
+        self.map_counter = 0
+        self.map_reset = 128
+        self.data = np.memmap(self.data_path, mode='r')
+
+    def __len__(self):
+        return self.data.size // self.max_dim
+
+    def __getitem__(self, idx):
+        if self.map_counter == self.map_reset:
+            self.data = np.memmap(self.data_path, mode='r')
+        else:
+            self.map_counter += 1
+
+        # get data
+        i = idx * self.max_dim
+        seq = torch.from_numpy(self.data[i:i+self.max_dim].astype(np.int64))
+
+        # extract separators, add extra separator at end or start of padding (easier final block handling)
+        last_sep = torch.cat([torch.nonzero(seq == 0).view(-1), torch.tensor([self.max_dim])])[:1]
+        sep_idxs = torch.cat([torch.nonzero(seq == 3).squeeze(-1), last_sep])
+
+        # pick mask size
+        choice = self.uniform.sample()
+        if choice > 0.8:
+            frac = self.uniform.sample()
+        else:
+            frac = self.beta.sample()
+        n_mask = (len(seq) * frac).int()
+
+        # ensure we have at least 1 known position and at least 1 unknown position
+        n_mask = max(min(n_mask, len(seq) - len(sep_idxs) - 1), len(sep_idxs)+1)
+
+        # make random motif
+        rand_idxs = torch.randperm(len(seq))[:n_mask]
+
+        attn, targets = diag_block_mask(rand_idxs, sep_idxs, self.max_dim)
+
+        # convert targets from indices to token ids
+        targets = torch.tensor(targets, dtype=int)
+        targets = torch.where(targets >= 0, seq[targets], targets)
+
+        return seq, targets, attn
+
 
 class ProteinBindingData(Dataset):
     def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2, start_seq_idx=0):

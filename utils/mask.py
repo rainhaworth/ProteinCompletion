@@ -148,7 +148,7 @@ def idx_to_mask_targets_hanoi(idx, seqlen, dim=512):
 
     targets = np.full((dim, 2), -100, dtype=int)
     mask = np.zeros((dim, dim), dtype=np.uint8)
-    mask[:len(targets), idx] = 1
+    mask[:seqlen, idx] = 1
     
     idx = sorted(idx)
 
@@ -178,7 +178,7 @@ def idx_to_mask_targets_hanoi(idx, seqlen, dim=512):
         # update mask; best to work 1 step ahead or we lose non-visited generation targets
         gen = set(list(gen_n) + list(gen_p))
         visited = visited.union(gen)
-        mask[list(gen),:] = [i in visited for i in range(dim)]
+        mask[list(gen),:] += [i in visited for i in range(dim)]
 
         # update segments
         i = 0
@@ -193,6 +193,27 @@ def idx_to_mask_targets_hanoi(idx, seqlen, dim=512):
                 i += 1
 
     return mask, targets
+
+# TODO: unit test
+def diag_block_mask(mask_idxs, sep_idxs, dim=512, i2m_f=idx_to_mask_targets_hanoi):
+    full_mask = np.zeros((dim, dim), dtype=np.uint8)
+    full_tgts = np.full((dim, 2), -100, dtype=int)
+
+    start_i = 0
+    for sep_i in sep_idxs:
+        mask_idxs_ = mask_idxs[mask_idxs >= start_i]
+        mask_idxs_ = mask_idxs_[mask_idxs_ < sep_i]
+        if mask_idxs_.size(0) == 0: continue
+        sub_mask, sub_tgts = idx_to_mask_targets_hanoi(mask_idxs_-start_i, sep_i-start_i, sep_i-start_i)
+
+        # add to full
+        sub_tgts[sub_tgts>0] += start_i
+        full_mask[start_i:sep_i, start_i:sep_i] = sub_mask
+        full_tgts[start_i:sep_i, :] = sub_tgts
+
+        start_i = (sep_i+1).item()
+
+    return full_mask, full_tgts
 
 def profile_path_mask(idx, seqlen, dim=512, pathfn=idx_to_path_targets_valid):
     assert 0 < len(idx) <= seqlen

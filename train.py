@@ -7,7 +7,7 @@ import time
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
-from utils.data import ProteinBindingData, MaskedProteinData
+from utils.data import ProteinBindingData, MaskedProteinData, PackedUnirefData
 from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_model_compat, load_train_config
 
 def main():
@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--max-samples', type=int, default=800000)
     parser.add_argument('--total-steps', type=int, default=1250000) # optional, specify total training step count
-    parser.add_argument('--warmup-steps', type=int, default=10000)
+    parser.add_argument('--warmup-steps', type=int, default=5000)
     parser.add_argument('--save-every', type=int, default=20000)
     parser.add_argument('--ckpt', type=str, default='')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
@@ -41,7 +41,7 @@ def main():
     checkpoint = args.ckpt
     if args.model_type == 'atp':
         model_class = BidirectionalCausalLM
-        data_class = ProteinBindingData
+        data_class = PackedUnirefData
     else:
         model_class = ESMlikeLM
         data_class = MaskedProteinData
@@ -65,13 +65,13 @@ def main():
         model = load_model_compat(model_class, configf, device, states)
 
     with print_time('loading tokenizer'):
-        tokenizer = create_tokenizer_custom(file='tokenizer.json')
+        tokenizer = create_tokenizer_custom(file='tokenizer-uniref.json')
 
     # load dataset(s)
     
     # helper function; keep it small and simple for now
     def make_dataloader(dataset):
-        return torch.utils.data.DataLoader(dataset, num_workers=2, pin_memory=True, batch_size=args.bsz)
+        return torch.utils.data.DataLoader(dataset, num_workers=2, pin_memory=True, batch_size=args.bsz, shuffle=True)
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.data):
         start_seq = init_step*args.bsz
@@ -103,9 +103,10 @@ def main():
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
             batches = 0
+            t0 = time.time()
             for seqs, targets, attns in train_dataloader:
-                t0 = time.time()
                 # put everything on the GPU
+                t0 = time.time()
                 seqs = seqs.to(device)
                 targets = targets.to(device)
                 if attns.shape[1] == 0:

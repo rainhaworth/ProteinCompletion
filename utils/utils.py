@@ -112,7 +112,7 @@ def get_scheduler(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1
 # load all other training state data from config
 def load_train_config(model, warmup_steps, train_steps, states=None):
     # initialize
-    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4, fused=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4, betas=(0.9, 0.98), weight_decay=0.1, fused=True)
     lr_scheduler = get_scheduler(optimizer, warmup_steps, train_steps)
 
     # load all provided states
