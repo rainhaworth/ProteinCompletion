@@ -103,6 +103,49 @@ def test_hanoi_predictors_are_invariant_to_their_hidden_targets():
                 )
 
 
+def test_atp_training_step_has_finite_loss_and_gradients():
+    torch.manual_seed(0)
+    config = BaseConfig(
+        vocab_size=32,
+        n_positions=10,
+        n_ctx=10,
+        n_embd=64,
+        n_layer=2,
+        n_head=8,
+        resid_pdrop=0.0,
+        embd_pdrop=0.0,
+        attn_pdrop=0.0,
+        use_cache=False,
+    )
+    model = BidirectionalCausalLM(config).train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scaler = torch.GradScaler('cpu', enabled=False)
+
+    seq = torch.tensor([[4, 5, 6, 7, 8, 9, 10, 11, 12, 13]])
+    mask, target_positions = idx_to_mask_targets_hanoi(
+        torch.tensor([3, 6]), 10, 10
+    )
+    targets = torch.full((1, 10, 2), -100, dtype=torch.long)
+    valid = target_positions >= 0
+    targets[0][valid] = seq[0, torch.tensor(target_positions[valid])]
+
+    with torch.amp.autocast('cpu', enabled=False):
+        logits = model(seq, attention_mask=torch.tensor(mask)[None, :, :])
+        loss = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, config.vocab_size), targets.reshape(-1)
+        )
+
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+    assert torch.isfinite(loss)
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in model.parameters()
+    )
+
+
 def test_completion_evaluator_is_valid_python():
     evaluator = Path(__file__).parents[1] / "eval-completion.py"
     compile(evaluator.read_text(encoding="utf-8"), str(evaluator), "exec")

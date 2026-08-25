@@ -6,9 +6,9 @@ from Bio import SeqIO
 
 from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi
 
-# FASTA reader
-# on this branch, assume we are always receiving UniRef data
-def fasta_gen(file, start_seq_idx=0):
+# UniRef FASTA reader. This preserves the current representative-ID filter until
+# the intended UniRef selection rule is confirmed.
+def fasta_gen_uniref(file, start_seq_idx=0):
     idx = 0
     with open(file) as f:
         for record in SeqIO.parse(f, 'fasta'):
@@ -27,10 +27,20 @@ def fasta_gen(file, start_seq_idx=0):
             # output
             yield seq, None
 
-def fasta_gen_basic(file, start_seq_idx=None):
+def fasta_gen_basic(file, start_seq_idx=0):
+    idx = 0
     with open(file) as f:
         for record in SeqIO.parse(f, 'fasta'):
+            idx += 1
+            if idx <= start_seq_idx: continue
             yield str(record.seq), None
+
+def detect_fasta_format(file):
+    with open(file) as f:
+        for line in f:
+            if line.startswith('>'):
+                return 'uniref' if line.startswith('>UniRef') else 'fasta'
+    raise ValueError(f'No FASTA records found in {file}')
 
 # TSV reader (for UniProt ID mapper output w/ binding sites)
 def tsv_gen(file):
@@ -74,14 +84,27 @@ def tsv_gen(file):
                     yield seq, bind_idx
 
 # select generator from file extension
-def make_gen_from_ext(file, start=0):
-    ext = file.split('.')[-1]
+def make_gen_from_ext(file, start=0, data_format='auto'):
+    ext = str(file).rsplit('.', 1)[-1].lower()
     if ext in ['fasta', 'fa']:
-        return fasta_gen(file, start)
+        if data_format == 'auto':
+            data_format = detect_fasta_format(file)
+        if data_format == 'uniref':
+            return fasta_gen_uniref(file, start)
+        if data_format == 'fasta':
+            return fasta_gen_basic(file, start)
+        raise ValueError(f'Invalid FASTA format {data_format}; expected auto, fasta, or uniref')
     elif ext == 'tsv':
         return tsv_gen(file)
     else:
         raise ValueError('Invalid file extension ' + ext + '; expected fasta or tsv')
+
+def require_nonempty_dataset(dataset, file):
+    if len(dataset) == 0:
+        raise ValueError(
+            f'No training sequences were loaded from {file}. '
+            'Check the file path and --data-format setting.'
+        )
 
 # binding site dropout for tensor idxs
 def apply_dropout(idxs, p_drop=0.2):
@@ -93,7 +116,7 @@ def apply_dropout(idxs, p_drop=0.2):
     return torch.sort(idxs_new[:elems_to_keep]).values
 
 class ProteinBindingData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2, start_seq_idx=0):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2, start_seq_idx=0, data_format='auto'):
         # start_seq_idx is indexed by order of emission from the generator; usually set to init_step * bsz
         self.max_dim = max_dim
         self.p_drop = p_drop
@@ -106,7 +129,7 @@ class ProteinBindingData(Dataset):
         self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
 
         # get generator
-        gen = make_gen_from_ext(file, start_seq_idx)
+        gen = make_gen_from_ext(file, start_seq_idx, data_format)
 
         # fetch all sequences and binding sites if available
         sample_count = 0
@@ -231,7 +254,7 @@ class ProteinBindingOnlyData(Dataset):
 
 # masked LM
 class MaskedProteinData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, start_seq_idx=0):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, start_seq_idx=0, data_format='auto'):
         # masking stuff
         self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
         self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
@@ -241,7 +264,7 @@ class MaskedProteinData(Dataset):
         self.seqs = []
 
         # get generator
-        gen = make_gen_from_ext(file, start_seq_idx)
+        gen = make_gen_from_ext(file, start_seq_idx, data_format)
 
         # copy-pasted from ProteinBindingData
         sample_count = 0

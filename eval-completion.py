@@ -8,15 +8,10 @@ from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import make_gen_from_ext
 from utils.utils import print_time, set_env, set_seed, load_model_compat, create_tokenizer_custom
-from utils.generation import gen_step_bidirectional, gen_step_esmlike, make_inference_mask, gen_step_atp
+from utils.generation import gen_step_esmlike, make_inference_mask, gen_step_atp, make_sample_fn
+from utils.metrics import amino_acid_composition_entropy, cross_entropy_to_perplexity
 
 from tqdm import tqdm
-from collections import Counter
-import time
-
-PAD_ID = 0
-BOS_ID = 1
-EOS_ID = 2
 VALID_AAS = 'ACDEFGHIKLMNPQRSTVWY' # restrict generation to 20 standard amino acids
 
 def cross_entropy_2way(logits, seq):
@@ -39,20 +34,6 @@ def seq_to_ce(seq : torch.Tensor, model, device, ce_fn=cross_entropy_2way):
     ce = ce_fn(logits.squeeze(0), seq.squeeze(0))
     return ce
 
-# compute shannon entropy by character frequencies
-def seq_entropy(seq : str, ignore_idxs):
-    idxs = set(ignore_idxs)
-    freqs = {c: 0 for c in VALID_AAS}
-    for i, c in enumerate(seq):
-        if i in idxs: continue
-        if c not in freqs.keys(): continue
-        freqs[c] += 1
-    freqs = np.array(list(freqs.values()), dtype=float)
-    freqs = freqs[freqs != 0]
-    freqs /= np.sum(freqs)
-    return -np.sum(freqs * np.log2(freqs))
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', type=str, default='./weights/model.pt')
@@ -60,14 +41,9 @@ def main():
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
-    parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
-    parser.add_argument('--max-steps', type=int, default=50)
-    parser.add_argument('--rep-window', type=int, default=4)
-    parser.add_argument('--rep-penalty', type=float, default=1.2)
+    parser.add_argument('--data-format', choices=['auto', 'fasta', 'uniref'], default='auto')
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
-    parser.add_argument('--max-window', type=int, default=-1)
     parser.add_argument('--config', type=str, default='./config-medium.json')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     parser.add_argument('--output', default='./out.tsv')
@@ -91,10 +67,6 @@ def main():
         args.device = 'cpu'
 
     device = torch.device(args.device)
-
-    if device.type == 'cpu':
-        print('falling back to fp32')
-        args.fp16 = False
 
     # load everything
 
@@ -123,7 +95,9 @@ def main():
         invalid_ids = [x for x in range(32) if x not in valid_ids]
 
     with print_time('loading datasets'):
-        dataset = make_gen_from_ext(args.data, init_step)
+        dataset = make_gen_from_ext(args.data, init_step, args.data_format)
+
+    sample_fn = make_sample_fn(args.sample, args.p)
 
     # run eval
     
@@ -131,8 +105,11 @@ def main():
 
     keep_fracs = [0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8]
 
+    output_parent = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(output_parent, exist_ok=True)
+
     with print_time('evaluating'), open(args.output, 'w') as outf:
-        outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
+        outf.write('generated %\tcontiguous\tfull-sequence PPL\tAA composition entropy\tidx\tseq\n')
         prev_seq = None
         
         for seq, _ in dataset:
@@ -164,8 +141,16 @@ def main():
                     gen_steps = len(prev_seq) - keep_sz
                     for gs in range(gen_steps): # removed tqdm
                         # generate next token
-                        new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False)
-                        if new_token == None:
+                        new_token, new_pos = gen_step(
+                            model,
+                            seq,
+                            idxs,
+                            device,
+                            invalid_ids,
+                            sample_fn=sample_fn,
+                            predict_terminals=False,
+                        )
+                        if new_token is None:
                             print('generation failed on step', gs)
                             print('seq', seq)
                             print('idxs', idxs)
@@ -180,8 +165,8 @@ def main():
                     outf.write('{:.2f}\t{}\t{}\t{:.2f}\t{}\t{}\n'.format(
                         (1-keep_frac)*100,
                         contiguous,
-                        2 ** seq_to_ce(seq, model, device, ce_fn),
-                        seq_entropy(seq_str, keep_idx),
+                        cross_entropy_to_perplexity(seq_to_ce(seq, model, device, ce_fn)),
+                        amino_acid_composition_entropy(seq_str, keep_idx),
                         keep_idx,
                         tokenizer.decode(seq.squeeze().numpy(force=True))
                         )

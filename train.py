@@ -6,7 +6,7 @@ import numpy as np
 
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
-from utils.data import ProteinBindingData, MaskedProteinData
+from utils.data import ProteinBindingData, MaskedProteinData, require_nonempty_dataset
 from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, load_model_compat, load_train_config
 
 def main():
@@ -15,8 +15,8 @@ def main():
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
+    parser.add_argument('--data-format', choices=['auto', 'fasta', 'uniref'], default='auto')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=1)
@@ -45,9 +45,9 @@ def main():
         model_class = ESMlikeLM
         data_class = MaskedProteinData
 
-    if device.type == 'cpu':
-        print('falling back to fp32')
-        args.fp16 = False
+    use_amp = device.type == 'cuda'
+    if not use_amp:
+        print('using fp32')
         
     # load checkpoint if provided
     if checkpoint != '' and os.path.exists(checkpoint):
@@ -74,7 +74,15 @@ def main():
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.data):
         start_seq = init_step*args.bsz
-        train_dataset = data_class(args.data, tokenizer, max_dim=model.config.n_ctx, max_samples=args.max_samples, start_seq_idx=start_seq)
+        train_dataset = data_class(
+            args.data,
+            tokenizer,
+            max_dim=model.config.n_ctx,
+            max_samples=args.max_samples,
+            start_seq_idx=start_seq,
+            data_format=args.data_format,
+        )
+        require_nonempty_dataset(train_dataset, args.data)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -88,7 +96,9 @@ def main():
     optimizer, lr_scheduler = load_train_config(model, args.warmup_steps, num_training_steps, states)
 
     loss_fn = torch.nn.CrossEntropyLoss()
-    scaler = torch.GradScaler(device.type)
+    scaler = torch.GradScaler(device.type, enabled=use_amp)
+
+    os.makedirs(args.save, exist_ok=True)
 
     # train
 
@@ -110,7 +120,7 @@ def main():
                 else:
                     attns = attns.to(device)
 
-                with torch.amp.autocast(device.type):
+                with torch.amp.autocast(device.type, enabled=use_amp):
                     logits = model(seqs, attention_mask=attns)
 
                     # squish logits + targets, compute loss

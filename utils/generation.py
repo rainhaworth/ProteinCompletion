@@ -40,10 +40,13 @@ def greedy_sample(logits):
 
 # nucleus sampling: choose position + token with probability given by logit distribution
 def nucleus_sample(logits, p=0.95):
+    if not 0 < p <= 1:
+        raise ValueError('p must be greater than 0 and at most 1')
+
     # find largest cutoff where we retain at least p of the probability mass
     logits_rev = logits.flatten().sort(descending=True)[0]
     cum_probs = logits_rev.cumsum(0)
-    min_keep_idx = torch.sum(cum_probs < p)
+    min_keep_idx = min(int(torch.sum(cum_probs < p)), logits_rev.numel() - 1)
 
     # rescale logits
     min_keep_val = logits_rev[min_keep_idx]
@@ -53,6 +56,13 @@ def nucleus_sample(logits, p=0.95):
     # sample; need to flatten then convert back to dim 0, dim 1 indices
     idx_flat = torch.multinomial(logits_rescaled.flatten(), 1)[0]
     return idx_flat // logits.shape[1], idx_flat % logits.shape[1]
+
+def make_sample_fn(method, p=0.95):
+    if method == 'greedy':
+        return greedy_sample
+    if method == 'nucleus':
+        return lambda logits: nucleus_sample(logits, p=p)
+    raise ValueError(f'Unknown sampling method {method}')
 
 # causal bidirectional generation
 def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=True):

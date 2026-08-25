@@ -1,7 +1,15 @@
 **/__pycache__
+.pytest_cache/
+.venv*/
 *.pyc
 *.out
 *.csv
 *.tsv
 *.sh
 *.png
+*.pt
+*.fasta
+*.fa
+*.bin
+data/
+weights/
