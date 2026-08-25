@@ -6,6 +6,9 @@ from Bio import SeqIO
 
 from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi, diag_block_mask
 
+PAD_ID = 0
+SEP_ID = 3
+
 # FASTA reader
 # on this branch, assume we are always receiving UniRef data
 def fasta_gen(file, start_seq_idx=0):
@@ -100,27 +103,21 @@ class PackedUnirefData(Dataset):
         # masking stuff
         self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
         self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
-        # for memmap memory management
-        self.map_counter = 0
-        self.map_reset = 128
-        self.data = np.memmap(self.data_path, mode='r')
 
     def __len__(self):
-        return self.data.size // self.max_dim
+        return np.memmap(self.data_path, mode='r').size // self.max_dim
 
     def __getitem__(self, idx):
-        if self.map_counter == self.map_reset:
-            self.data = np.memmap(self.data_path, mode='r')
-        else:
-            self.map_counter += 1
+        # regenerating constantly avoids memory leaks with low overhead, see https://github.com/karpathy/nanoGPT/blob/master/train.py
+        data = np.memmap(self.data_path, mode='r')
 
         # get data
         i = idx * self.max_dim
-        seq = torch.from_numpy(self.data[i:i+self.max_dim].astype(np.int64))
+        seq = torch.from_numpy(data[i:i+self.max_dim].astype(np.int64))
 
         # extract separators, add extra separator at end or start of padding (easier final block handling)
-        last_sep = torch.cat([torch.nonzero(seq == 0).view(-1), torch.tensor([self.max_dim])])[:1]
-        sep_idxs = torch.cat([torch.nonzero(seq == 3).squeeze(-1), last_sep])
+        last_sep = torch.cat([torch.nonzero(seq == PAD_ID).view(-1), torch.tensor([self.max_dim])])[:1]
+        sep_idxs = torch.cat([torch.nonzero(seq == SEP_ID).squeeze(-1), last_sep])
 
         # pick mask size
         choice = self.uniform.sample()
@@ -128,18 +125,41 @@ class PackedUnirefData(Dataset):
             frac = self.uniform.sample()
         else:
             frac = self.beta.sample()
-        n_mask = (len(seq) * frac).int()
 
-        # ensure we have at least 1 known position and at least 1 unknown position
-        n_mask = max(min(n_mask, len(seq) - len(sep_idxs) - 1), len(sep_idxs)+1)
+        # generate mask_idxs with min + max per seq (long, hard to vectorize)
 
-        # make random motif
-        rand_idxs = torch.randperm(len(seq))[:n_mask]
+        # assign 1-indexed ids to each seq, 0 to pad/sep
+        not_res = (seq == SEP_ID) | (seq == PAD_ID)
+        seq_ids = torch.cumsum((seq == SEP_ID), 0) + 1
+        seq_ids[not_res] = 0
 
-        attn, targets = diag_block_mask(rand_idxs, sep_idxs, self.max_dim)
+        # find length of each seq, compute mask size, override pad/sep mask
+        all_lens = torch.bincount(seq_ids)
+        padsep_len = all_lens[0]
+        seq_lens = all_lens[1:]
+        mask_szs = (seq_lens * frac).int().clamp(torch.ones_like(seq_lens),seq_lens-1)
+
+        # batch randperm w/ noise overlay; filter out sep/ped
+        noise = torch.rand(self.max_dim)
+        seq_ids[not_res] = 100
+        grouped_noise = noise + (seq_ids * 2.0)
+        sorted_idx = torch.argsort(grouped_noise)[:self.max_dim-padsep_len]
+
+        # find seq start positions within sorted_idx, asign 0-indexed seq_ids to each sorted_idx
+        start_idx = torch.zeros_like(seq_lens)
+        start_idx[1:] = torch.cumsum(seq_lens[:-1], 0)
+        seq_ids_sorted = seq_ids[sorted_idx]-1
+
+        # batch randperm slice: assign ranks to each seq in sorted_idx then apply mask_szs thresholds
+        seq_ranks = torch.arange(len(sorted_idx)) - start_idx[seq_ids_sorted]
+        in_mask = seq_ranks < mask_szs[seq_ids_sorted]
+        mask_idxs = sorted_idx[in_mask]
+
+        # end mask_idxs generation
+
+        attn, targets = diag_block_mask(mask_idxs, sep_idxs, self.max_dim)
 
         # convert targets from indices to token ids
-        targets = torch.tensor(targets, dtype=int)
         targets = torch.where(targets >= 0, seq[targets], targets)
 
         return seq, targets, attn
