@@ -99,6 +99,7 @@ def load_model_compat(model_class, config_file, device, states=None):
 
 # transformer LR scheduler, from https://huggingface.co/transformers/v4.4.2/_modules/transformers/optimization.html#get_linear_schedule_with_warmup
 # we don't use anything else from transformers so this avoids the import entirely
+# TODO: cosine scheduling?
 def get_scheduler(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
     def lr_lambda(current_step: int):
         if current_step < num_warmup_steps:

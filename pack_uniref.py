@@ -25,6 +25,7 @@ TOK_START = 4
 tokens = ['<pad>', '<bos>', '<eos>', '<sep>'] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 vocab = {token: i for i, token in enumerate(tokens)}
 vocab['<unk>'] = len(vocab)
+vocab['<mask>'] = len(vocab) # oops forgot about this; mask ID = 31
 tokenizer = Tokenizer(models.WordLevel(vocab, '<unk>'))
 tokenizer.pre_tokenizer = pre_tokenizers.Split('', 'isolated') # character-level
 tokenizer.save('tokenizer-uniref.json')
