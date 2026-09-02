@@ -2,12 +2,15 @@ import torch
 
 from utils.config import BaseConfig
 from utils.generation import (
-    MASK_ID,
     gen_step_atp,
     gen_step_esmlike,
     make_mlm_input,
 )
 from utils.model_esmlike import ESMlikeLM
+
+
+MASK_ID = 31
+SEP_ID = 3
 
 
 class RecordingESM(torch.nn.Module):
@@ -49,7 +52,7 @@ def test_make_mlm_input_masks_only_unrevealed_positions_without_mutation():
     seq = torch.tensor([[4, 5, 6, 7, 8]])
     original = seq.clone()
 
-    model_input = make_mlm_input(seq, torch.tensor([1, 3]))
+    model_input = make_mlm_input(seq, torch.tensor([1, 3]), MASK_ID)
 
     assert torch.equal(model_input, torch.tensor([[MASK_ID, 5, MASK_ID, 7, MASK_ID]]))
     assert torch.equal(seq, original)
@@ -58,8 +61,8 @@ def test_make_mlm_input_masks_only_unrevealed_positions_without_mutation():
 def test_make_mlm_input_reveals_generated_residue_on_next_step():
     seq = torch.tensor([[4, 5, 9, 7, 8]])
 
-    before = make_mlm_input(seq, torch.tensor([1, 3]))
-    after = make_mlm_input(seq, torch.tensor([1, 2, 3]))
+    before = make_mlm_input(seq, torch.tensor([1, 3]), MASK_ID)
+    after = make_mlm_input(seq, torch.tensor([1, 2, 3]), MASK_ID)
 
     assert before[0, 2] == MASK_ID
     assert after[0, 2] == 9
@@ -76,9 +79,11 @@ def test_esmlike_generation_masks_unknown_tokens_and_uses_full_attention():
         torch.device("cpu"),
         sample_fn=greedy_sample,
         return_logits=True,
+        mask_id=MASK_ID,
     )
 
     assert torch.equal(model.inputs[-1], torch.tensor([[MASK_ID, 5, MASK_ID, 7, MASK_ID]]))
+    assert not torch.any(model.inputs[-1] == SEP_ID)
     assert model.attention_masks[-1] is None
 
 
@@ -102,13 +107,25 @@ def test_esmlike_logits_are_invariant_to_unrevealed_true_tokens():
     known = torch.tensor([1, 3])
 
     logits_a, _ = gen_step_esmlike(
-        model, seq_a, known, torch.device("cpu"), return_logits=True
+        model, seq_a, known, torch.device("cpu"), return_logits=True, mask_id=MASK_ID
     )
     logits_b, _ = gen_step_esmlike(
-        model, seq_b, known, torch.device("cpu"), return_logits=True
+        model, seq_b, known, torch.device("cpu"), return_logits=True, mask_id=MASK_ID
     )
 
     assert torch.equal(logits_a, logits_b)
+
+
+def test_esmlike_generation_requires_explicit_mask_id():
+    model = RecordingESM()
+    seq = torch.tensor([[4, 5, 6]])
+
+    try:
+        gen_step_esmlike(model, seq, torch.tensor([1]), torch.device("cpu"))
+    except ValueError as exc:
+        assert "mask" in str(exc).lower()
+    else:
+        raise AssertionError("ESM generation accepted a missing mask token ID")
 
 
 def test_atp_generation_path_is_unchanged():

@@ -63,6 +63,7 @@ def main():
     parser.add_argument('--t', type=float, default=0.2)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
+    parser.add_argument('--tokenizer', type=str, default='./tokenizer-uniref.json')
     parser.add_argument('--max-steps', type=int, default=50)
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
@@ -115,7 +116,13 @@ def main():
 
 
     with print_time('loading tokenizer'):
-        tokenizer = create_tokenizer_custom(file='tokenizer.json')
+        tokenizer = create_tokenizer_custom(file=args.tokenizer)
+
+        mask_id = None
+        if args.model_type == 'esm':
+            mask_id = tokenizer.token_to_id('<mask>')
+            if mask_id is None:
+                raise ValueError('Tokenizer does not define a <mask> token')
 
         # get valid token IDs; does not work with proper BPE
         # this excludes terminals, which are handled later
@@ -135,7 +142,7 @@ def main():
         outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
         prev_seq = None
         
-	for seq, _ in dataset:
+        for seq, _ in dataset:
             if seq == prev_seq: continue
             if len(seq) < 100 or len(seq) > 1000: continue
 
@@ -164,7 +171,16 @@ def main():
                     gen_steps = len(prev_seq) - keep_sz
                     for gs in range(gen_steps): # removed tqdm
                         # generate next token
-                        new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, predict_terminals=False)
+                        gen_kwargs = {'mask_id': mask_id} if args.model_type == 'esm' else {}
+                        new_token, new_pos = gen_step(
+                            model,
+                            seq,
+                            idxs,
+                            device,
+                            invalid_ids,
+                            predict_terminals=False,
+                            **gen_kwargs,
+                        )
                         if new_token == None:
                             print('generation failed on step', gs)
                             print('seq', seq)

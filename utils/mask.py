@@ -163,10 +163,8 @@ def idx_to_mask_targets_hanoi(idx, dim=512):
 
     # find initial motif segments
     segments = idx_to_segments_tensor(idx)
-    visited = idx.clone()
-
     # iterate until we only have one segment covering the whole sequence
-    while visited.size(0) < dim:
+    while idx.size(0) < dim:
         # get all NTP and PTP targets
         segments = idx_to_segments_tensor(idx)
         n_pos_s = segments[:,1]
@@ -183,14 +181,15 @@ def idx_to_mask_targets_hanoi(idx, dim=512):
         targets[p_pos_s, 0] = gen_p
 
         # update mask; best to work 1 step ahead or we lose non-visited generation targets
-        gen = torch.cat([gen_n, gen_p])
-        visited = torch.cat([visited, gen])
+        gen = torch.unique(torch.cat([gen_n, gen_p]))
         new_row = torch.zeros(dim, dtype=torch.uint8)
-        new_row[visited] = 1
+        new_row[idx] = 1
+        new_row[gen] = 1
         mask[gen,:] = new_row
 
-        # update idx
-        idx = torch.nonzero(new_row).squeeze().to(idx.dtype)
+        # update idx using unique visible positions. Counting concatenated
+        # generation fronts can stop early when NTP and PTP meet.
+        idx = torch.nonzero(new_row).squeeze(-1).to(idx.dtype)
         
 
     return mask, targets

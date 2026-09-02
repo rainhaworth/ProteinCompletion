@@ -6,7 +6,6 @@ from .mask import idx_to_segments
 PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
-MASK_ID = 3
 
 # from sequence + list of valid indices, generate mask for inference
 def make_inference_mask(seqlen, idx, device, dim=512):
@@ -23,7 +22,7 @@ def make_inference_mask(seqlen, idx, device, dim=512):
     return mask[None,:,:]
 
 
-def make_mlm_input(seq, idxs, mask_id=MASK_ID):
+def make_mlm_input(seq, idxs, mask_id):
     """Return an MLM input containing no unrevealed true token values."""
     model_input = seq.clone()
     known = torch.zeros(seq.size(-1), dtype=torch.bool, device=seq.device)
@@ -124,15 +123,18 @@ def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=
     return new_token, new_pos
 
 # esmlike generation
-def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=None):
+def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=None, mask_id=None):
     # unimplemented: repetition penalties, predict_terminals
+
+    if mask_id is None:
+        raise ValueError('ESM generation requires the <mask> token ID from the training tokenizer')
 
     # stop generation if we run out of positions to predict
     if len(idxs) == seq.size(1): return None, None
 
     # Match MLM training by masking unknown inputs and retaining bidirectional
     # attention. The ATP inference mask was not used during MLM training.
-    model_input = make_mlm_input(seq, idxs)
+    model_input = make_mlm_input(seq, idxs, mask_id)
     logits = model(model_input, attention_mask=None)
     logits = torch.squeeze(logits, 0)
 
