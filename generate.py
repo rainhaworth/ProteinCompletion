@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--t', type=float, default=0.2)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
+    parser.add_argument('--tokenizer', type=str, default='./tokenizer-uniref.json')
     parser.add_argument('--max-steps', type=int, default=50)
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
@@ -65,7 +66,13 @@ def main():
         model = load_compat(model_class, args.config, device, args.weights, training=False)
 
     with print_time('loading tokenizer'):
-        tokenizer = create_tokenizer_custom(file='tokenizer.json')
+        tokenizer = create_tokenizer_custom(file=args.tokenizer)
+
+        mask_id = None
+        if args.model_type == 'esmlike':
+            mask_id = tokenizer.token_to_id('<mask>')
+            if mask_id is None:
+                raise ValueError('Tokenizer does not define a <mask> token')
 
         # get valid token IDs; does not work with proper BPE
         # this excludes terminals, which are handled later
@@ -106,7 +113,18 @@ def main():
             for _ in tqdm(range(max_steps)):
                 # generate next token if possible
                 # TODO: custom gen_step for ESMlikeLM
-                new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, rp, rw, sample_fn)
+                gen_kwargs = {'mask_id': mask_id} if args.model_type == 'esmlike' else {}
+                new_token, new_pos = gen_step(
+                    model,
+                    seq,
+                    idxs,
+                    device,
+                    invalid_ids,
+                    rp,
+                    rw,
+                    sample_fn,
+                    **gen_kwargs,
+                )
                 if new_token == None: break
 
                 # update seq and idxs

@@ -8,7 +8,6 @@ from .mask import idx_to_mask_start, rand_mask_start, idx_to_mask_targets_hanoi,
 
 PAD_ID = 0
 SEP_ID = 3
-MASK_ID = 31 # TODO: if we retrain from scratch, change this
 
 # FASTA reader
 # on this branch, assume we are always receiving UniRef data
@@ -89,6 +88,15 @@ class PackedUnirefData(Dataset):
         self.max_dim = max_dim
         self.data_path = file
         self.model_type = model_type
+        self.mask_id = None
+        if self.model_type == 'esm':
+            if tokenizer is None:
+                raise ValueError('ESM training requires the tokenizer used to pack the data')
+            self.mask_id = tokenizer.token_to_id('<mask>')
+            if self.mask_id is None:
+                raise ValueError('Tokenizer does not define a <mask> token')
+            if self.mask_id in (PAD_ID, SEP_ID):
+                raise ValueError('The ESM mask token must be distinct from padding and separators')
         # masking stuff
         self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
         self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
@@ -159,7 +167,7 @@ class PackedUnirefData(Dataset):
             targets[mask_idxs] = seq[mask_idxs].clone()
 
             # apply mask to seq
-            seq[mask_idxs] = MASK_ID
+            seq[mask_idxs] = self.mask_id
     
             # make block diagonal attention mask; this is not efficient but it works for ATP
             attn = torch.zeros((self.max_dim, self.max_dim), dtype=torch.uint8)

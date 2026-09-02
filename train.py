@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
+    parser.add_argument('--tokenizer', type=str, default='./tokenizer-uniref.json')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=1)
@@ -67,8 +68,13 @@ def main():
     def make_dataloader(dataset):
         return torch.utils.data.DataLoader(dataset, num_workers=2, pin_memory=True, batch_size=args.bsz, shuffle=True)
 
+    tokenizer = None
+    if args.model_type == 'esm':
+        with print_time('loading tokenizer from ' + args.tokenizer):
+            tokenizer = create_tokenizer_custom(args.tokenizer)
+
     with print_time('loading samples from ' + args.data):
-        train_dataset = PackedUnirefData(args.data, max_dim=model.config.n_ctx, model_type=args.model_type)
+        train_dataset = PackedUnirefData(args.data, tokenizer=tokenizer, max_dim=model.config.n_ctx, model_type=args.model_type)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
