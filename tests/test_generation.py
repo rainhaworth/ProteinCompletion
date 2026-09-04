@@ -1,9 +1,11 @@
 import torch
+import pytest
 
 from utils.config import BaseConfig
 from utils.generation import (
     gen_step_atp,
     gen_step_esmlike,
+    make_sample_fn,
     make_mlm_input,
 )
 from utils.model_esmlike import ESMlikeLM
@@ -143,3 +145,13 @@ def test_atp_generation_path_is_unchanged():
 
     assert torch.equal(model.inputs[-1], seq)
     assert model.attention_masks[-1] is not None
+
+
+def test_sampling_configuration_controls_the_selected_sampler():
+    probabilities = torch.tensor([[0.8, 0.2]])
+
+    assert make_sample_fn('greedy')(probabilities)[1] == 0
+    assert make_sample_fn('nucleus', p=0.5)(probabilities)[1] == 0
+
+    with pytest.raises(ValueError, match='p must be'):
+        make_sample_fn('nucleus', p=0)(probabilities)
