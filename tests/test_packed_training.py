@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from utils.data import PackedUnirefData
-from utils.mask import idx_to_mask_targets_hanoi
+from utils.mask import diag_block_mask, idx_to_mask_targets_hanoi
 
 
 class TokenizerStub:
@@ -61,6 +61,55 @@ def test_hanoi_mask_keeps_two_sided_targets_when_fronts_meet():
 
     assert targets[0, 1] == 1
     assert targets[2, 0] == 1
+
+
+def test_packed_atp_offsets_target_zero_in_later_blocks():
+    mask_indices = torch.tensor([0, 3])
+    separator_indices = torch.tensor([1, 4])
+
+    _, targets = diag_block_mask(mask_indices, separator_indices, dim=4)
+
+    assert targets[3, 0] == 2
+
+
+def test_packed_atp_blocks_match_standalone_masks_exhaustively():
+    for block_start in (2, 5, 11):
+        prefix_length = block_start - 1
+        for length in range(1, 8):
+            positions = range(length)
+            for motif_size in range(1, length + 1):
+                for motif in itertools.combinations(positions, motif_size):
+                    local_motif = torch.tensor(motif)
+                    mask_indices = torch.cat(
+                        [torch.tensor([0]), local_motif + block_start]
+                    )
+                    separator_indices = torch.tensor(
+                        [prefix_length, block_start + length]
+                    )
+
+                    packed_mask, packed_targets = diag_block_mask(
+                        mask_indices,
+                        separator_indices,
+                        dim=block_start + length,
+                    )
+                    expected_mask, expected_targets = idx_to_mask_targets_hanoi(
+                        local_motif,
+                        length,
+                    )
+                    expected_targets[expected_targets >= 0] += block_start
+
+                    block_slice = slice(block_start, block_start + length)
+                    assert torch.equal(
+                        packed_mask[block_slice, block_slice], expected_mask
+                    ), (block_start, length, motif)
+                    assert torch.equal(
+                        packed_targets[block_slice], expected_targets
+                    ), (block_start, length, motif)
+                    assert not torch.any(packed_mask[block_slice, :block_start]), (
+                        block_start,
+                        length,
+                        motif,
+                    )
 
 
 def test_packed_esm_uses_mask_id_from_tokenizer(tmp_path):
