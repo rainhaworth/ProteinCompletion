@@ -7,6 +7,62 @@ PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
 
+
+def resolve_terminal_ids(tokenizer):
+    """Return BOS and EOS IDs for either tokenizer format used by the project."""
+    bos_id = tokenizer.token_to_id('<bos>')
+    eos_id = tokenizer.token_to_id('<eos>')
+    if bos_id is None:
+        bos_id = tokenizer.token_to_id('<|bos|>')
+    if eos_id is None:
+        eos_id = tokenizer.token_to_id('<|eos|>')
+    if bos_id is None or eos_id is None:
+        raise ValueError('Tokenizer does not define BOS and EOS tokens')
+    return bos_id, eos_id
+
+
+def decode_token_ids(tokenizer, token_ids, excluded_ids=()):
+    """Decode residue IDs without inserting separators between character tokens."""
+    excluded = {int(token_id) for token_id in excluded_ids}
+    pieces = []
+    for token_id in torch.as_tensor(token_ids).reshape(-1).detach().cpu().tolist():
+        if token_id in excluded:
+            continue
+        token = tokenizer.id_to_token(int(token_id))
+        if token is None:
+            raise ValueError(f'Tokenizer does not define token ID {token_id}')
+        pieces.append(token)
+    return ''.join(pieces)
+
+
+def decode_visible_token_ids(
+    tokenizer,
+    token_ids,
+    visible_indices,
+    excluded_ids=(),
+    hidden_symbol='?',
+):
+    """Decode visible tokens while replacing unrevealed positions."""
+    excluded = {int(token_id) for token_id in excluded_ids}
+    visible = {
+        int(index)
+        for index in torch.as_tensor(visible_indices).reshape(-1).detach().cpu().tolist()
+    }
+    pieces = []
+    for index, token_id in enumerate(
+        torch.as_tensor(token_ids).reshape(-1).detach().cpu().tolist()
+    ):
+        if token_id in excluded:
+            continue
+        if index not in visible:
+            pieces.append(hidden_symbol)
+            continue
+        token = tokenizer.id_to_token(int(token_id))
+        if token is None:
+            raise ValueError(f'Tokenizer does not define token ID {token_id}')
+        pieces.append(token)
+    return ''.join(pieces)
+
 # from sequence + list of valid indices, generate mask for inference
 def make_inference_mask(seqlen, idx, device, dim=512):
     # reduce to subsequence if necessary
@@ -92,13 +148,26 @@ def make_sample_fn(method, p=0.95):
     raise ValueError(f'Unknown sampling method {method}')
 
 # causal bidirectional generation
-def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=True):
+def gen_step_bidirectional(
+    model,
+    seq,
+    idxs,
+    device,
+    invalid_ids=[],
+    rp=1.2,
+    rw=4,
+    sample_fn=nucleus_sample,
+    return_logits=False,
+    predict_terminals=True,
+    bos_id=BOS_ID,
+    eos_id=EOS_ID,
+):
     # get segments; use copy of idxs so we don't have weird memory issues
     segments = idx_to_segments(idxs.detach().clone())
 
     # get PTP/NTP indices
-    p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] not in [BOS_ID, BOS_ID+2]]
-    n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] not in [EOS_ID, EOS_ID+2]]
+    p_idxs = [seg[0] for seg in segments if seq[:, seg[0]] != bos_id]
+    n_idxs = [seg[1] for seg in segments if seq[:, seg[1]] != eos_id]
 
     # if not predicting terminals, assume fixed window like ESM
     if not predict_terminals:
@@ -137,10 +206,10 @@ def gen_step_bidirectional(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=
     if predict_terminals:
         # if we can predict BOS, allow
         if len(p_idxs) > 0 and p_idxs[0] == 0:
-            mask[0, [BOS_ID, BOS_ID+2]] = 0
+            mask[0, bos_id] = 0
         # same for EOS
         if len(n_idxs) > 0 and n_idxs[-1] == seq.size(1) - 1:
-            mask[-1, [EOS_ID, EOS_ID+2]] = 0
+            mask[-1, eos_id] = 0
     logits += mask
 
     # compute (numerically stable) softmax over all logits representing viable next steps
@@ -199,13 +268,26 @@ def gen_step_esmlike(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sam
     return new_token, new_pos
 
 # new experimental generation for ATP
-def gen_step_atp(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False, predict_terminals=True):
+def gen_step_atp(
+    model,
+    seq,
+    idxs,
+    device,
+    invalid_ids=[],
+    rp=1.2,
+    rw=4,
+    sample_fn=nucleus_sample,
+    return_logits=False,
+    predict_terminals=True,
+    bos_id=BOS_ID,
+    eos_id=EOS_ID,
+):
     # get segments; use copy of idxs so we don't have weird memory issues
     segments = idx_to_segments(idxs.detach().clone())
 
     # get PTP/NTP indices
-    p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] not in [BOS_ID, BOS_ID+2]]
-    n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] not in [EOS_ID, EOS_ID+2]]
+    p_idxs = [seg[0] for seg in segments if seq[:, seg[0]] != bos_id]
+    n_idxs = [seg[1] for seg in segments if seq[:, seg[1]] != eos_id]
 
     # if not predicting terminals, assume fixed window like ESM
     if not predict_terminals:
@@ -243,6 +325,10 @@ def gen_step_atp(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_
         drop_val = -1e9
         mask = torch.zeros_like(logits)
         mask[:,invalid_ids] = drop_val
+        if predict_terminals and i == 0 and n_idxs[-1] == seq.size(1) - 1:
+            mask[-1, eos_id] = 0
+        if predict_terminals and i == 1 and p_idxs[0] == 0:
+            mask[0, bos_id] = 0
         logits += mask
 
         entropy = torch.distributions.Categorical(logits=logits.log_softmax(-1)).entropy()

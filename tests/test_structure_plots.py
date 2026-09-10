@@ -6,7 +6,6 @@ import pytest
 pytest.importorskip('pandas')
 pytest.importorskip('matplotlib')
 pytest.importorskip('seaborn')
-pytest.importorskip('plotly')
 
 from StructureEvaluation import gen_combined_figs_driver
 from StructureEvaluation import gen_figs_single_driver

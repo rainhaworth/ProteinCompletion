@@ -104,6 +104,11 @@ def load_model_checkpoint(model_class, config_file, device, checkpoint):
 
     saved = torch.load(checkpoint, map_location='cpu', weights_only=False)
     if isinstance(saved, torch.nn.Module):
+        if not isinstance(saved, model_class):
+            raise ValueError(
+                f'Checkpoint contains {type(saved).__name__}, but '
+                f'{model_class.__name__} was requested'
+            )
         model = saved.to(device)
     elif isinstance(saved, dict) and 'model_state' in saved:
         model = load_model_compat(model_class, config_file, device, saved)

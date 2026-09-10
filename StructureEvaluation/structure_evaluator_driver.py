@@ -128,7 +128,7 @@ def main(argv=None, evaluator_factory=StructureEvaluator):
     )
     print(f'completed {successful} records; {failed} failed')
     print('results saved to', output_path.resolve())
-    return 0 if successful else 1
+    return 0 if failed == 0 else 1
 
 
 if __name__ == '__main__':

@@ -1,7 +1,10 @@
 import csv
+import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
 
@@ -16,6 +19,15 @@ from utils.evaluation import score_atp_logits, score_esm_logits
 from utils.generation import update_generation_state
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
+from utils.utils import load_model_checkpoint
+
+
+EVAL_COMPLETION_SPEC = importlib.util.spec_from_file_location(
+    'eval_completion_script',
+    Path(__file__).resolve().parents[1] / 'eval-completion.py',
+)
+eval_completion_script = importlib.util.module_from_spec(EVAL_COMPLETION_SPEC)
+EVAL_COMPLETION_SPEC.loader.exec_module(eval_completion_script)
 
 
 def tiny_config():
@@ -90,6 +102,27 @@ def test_scoring_helpers_align_targets_and_heads():
     assert esm_result['targets'] == 2
 
 
+def test_completion_atp_cross_entropy_averages_before_perplexity():
+    sequence = torch.tensor([4, 5, 6])
+    logits = torch.zeros(3, 64)
+    logits[1:, :32] = torch.tensor([[2.0] + [0.0] * 31, [0.0, 2.0] + [0.0] * 30])
+    logits[:-1, 32:] = torch.tensor([[0.0] * 2 + [2.0] + [0.0] * 29, [0.0] * 3 + [2.0] + [0.0] * 28])
+
+    combined = eval_completion_script.cross_entropy_2way(logits, sequence)
+    previous = torch.nn.functional.cross_entropy(logits[1:, :32], sequence[:-1])
+    next_value = torch.nn.functional.cross_entropy(logits[:-1, 32:], sequence[1:])
+
+    assert torch.allclose(combined, (previous + next_value) / 2)
+
+
+def test_completion_atp_cross_entropy_rejects_single_residue():
+    with pytest.raises(ValueError, match='at least two residues'):
+        eval_completion_script.cross_entropy_2way(
+            torch.zeros(1, 64),
+            torch.tensor([4]),
+        )
+
+
 def test_generation_state_handles_prepend_replace_and_append():
     sequence = torch.tensor([[5, 6]])
     known = torch.tensor([0, 1])
@@ -100,6 +133,48 @@ def test_generation_state_handles_prepend_replace_and_append():
 
     assert torch.equal(sequence, torch.tensor([[4, 8, 6, 7]]))
     assert torch.equal(known, torch.arange(4))
+
+
+def test_generation_output_preserves_motif_indices_and_hides_unknown_values(tmp_path):
+    tokenizer = Tokenizer.from_file(str(write_uniref_tokenizer(tmp_path)))
+    sequence = torch.tensor([[1, 4, 6, 2]])
+
+    complete_sequence, motif, visible = generate_script.prepare_generation_output(
+        sequence,
+        visible_indices=torch.arange(4),
+        motif_indices=torch.tensor([2]),
+        tokenizer=tokenizer,
+        complete=True,
+        bos_id=1,
+        eos_id=2,
+    )
+    partial_sequence, _, _ = generate_script.prepare_generation_output(
+        sequence,
+        visible_indices=torch.tensor([1]),
+        motif_indices=torch.tensor([1]),
+        tokenizer=tokenizer,
+        complete=False,
+        bos_id=1,
+        eos_id=2,
+    )
+
+    assert complete_sequence == 'AC'
+    assert motif.tolist() == [1]
+    assert visible.tolist() == [0, 1]
+    assert partial_sequence == 'A?'
+
+
+def test_serialized_checkpoint_must_match_requested_model_type(tmp_path):
+    checkpoint = tmp_path / 'esm-model.pt'
+    torch.save(ESMlikeLM(tiny_config()), checkpoint)
+
+    with pytest.raises(ValueError, match='BidirectionalCausalLM'):
+        load_model_checkpoint(
+            BidirectionalCausalLM,
+            tmp_path / 'unused.json',
+            torch.device('cpu'),
+            checkpoint,
+        )
 
 
 def test_generate_and_eval_scripts_run_with_tiny_checkpoint(tmp_path):
@@ -139,8 +214,99 @@ def test_generate_and_eval_scripts_run_with_tiny_checkpoint(tmp_path):
     generated = list(csv.DictReader(generation_output.open(), delimiter='\t'))
     evaluated = list(csv.DictReader(evaluation_output.open(), delimiter='\t'))
     assert generated[0]['complete'] == 'True'
-    assert generated[0]['sequence']
+    assert len(generated[0]['sequence']) == 6
+    assert ' ' not in generated[0]['sequence']
+    assert '?' not in generated[0]['sequence']
+    assert generated[0]['known_indices'] != generated[0]['visible_indices']
     assert evaluated[0]['targets'] == '1'
+
+
+def test_completion_evaluation_runs_without_gradients_or_spaced_sequences(tmp_path):
+    config_path, checkpoint_path = write_tiny_checkpoint(tmp_path)
+    tokenizer_path = write_uniref_tokenizer(tmp_path)
+    fasta_path = tmp_path / 'proteins.fasta'
+    fasta_path.write_text('>example\nACDEF\n', encoding='utf-8')
+    output_path = tmp_path / 'completion.tsv'
+
+    eval_completion_script.main(
+        [
+            '--weights', str(checkpoint_path),
+            '--config', str(config_path),
+            '--data', str(fasta_path),
+            '--tokenizer', str(tokenizer_path),
+            '--device', 'cpu',
+            '--model_type', 'esm',
+            '--sample', 'greedy',
+            '--min-length', '2',
+            '--max-length', '8',
+            '--keep-fracs', '0.5',
+            '--max-samples', '1',
+            '--output', str(output_path),
+        ]
+    )
+
+    rows = list(csv.DictReader(output_path.open(), delimiter='\t'))
+    assert len(rows) == 2
+    assert all(float(row['fully-visible reconstruction PPL']) > 0 for row in rows)
+    assert all(row['generated %'] == '60.00' for row in rows)
+    assert all(len(row['seq']) == 5 and ' ' not in row['seq'] for row in rows)
+
+
+def test_completion_evaluation_fails_when_no_sequence_is_eligible(tmp_path):
+    config_path, checkpoint_path = write_tiny_checkpoint(tmp_path)
+    fasta_path = tmp_path / 'proteins.fasta'
+    fasta_path.write_text('>short\nAC\n', encoding='utf-8')
+
+    with pytest.raises(ValueError, match='No sequences satisfied'):
+        eval_completion_script.main(
+            [
+                '--weights', str(checkpoint_path),
+                '--config', str(config_path),
+                '--data', str(fasta_path),
+                '--tokenizer', str(write_uniref_tokenizer(tmp_path)),
+                '--device', 'cpu',
+                '--model_type', 'esm',
+                '--min-length', '3',
+                '--max-length', '8',
+                '--keep-fracs', '0.5',
+                '--max-samples', '1',
+                '--output', str(tmp_path / 'completion.tsv'),
+            ]
+        )
+
+
+def test_atp_completion_handles_alanine_frontiers(tmp_path):
+    config_path, _ = write_tiny_checkpoint(tmp_path)
+    checkpoint_path = tmp_path / 'tiny-atp.pt'
+    torch.save(
+        {'step': 0, 'model_state': BidirectionalCausalLM(tiny_config()).state_dict()},
+        checkpoint_path,
+    )
+    tokenizer_path = write_uniref_tokenizer(tmp_path)
+    fasta_path = tmp_path / 'alanines.fasta'
+    fasta_path.write_text('>example\nAAAAAA\n', encoding='utf-8')
+    output_path = tmp_path / 'completion-atp.tsv'
+
+    eval_completion_script.main(
+        [
+            '--weights', str(checkpoint_path),
+            '--config', str(config_path),
+            '--data', str(fasta_path),
+            '--tokenizer', str(tokenizer_path),
+            '--device', 'cpu',
+            '--model_type', 'atp',
+            '--sample', 'greedy',
+            '--min-length', '2',
+            '--max-length', '8',
+            '--keep-fracs', '0.5',
+            '--max-samples', '1',
+            '--output', str(output_path),
+        ]
+    )
+
+    rows = list(csv.DictReader(output_path.open(), delimiter='\t'))
+    assert len(rows) == 2
+    assert all(len(row['seq']) == 6 and ' ' not in row['seq'] for row in rows)
 
 
 def test_generate_and_eval_scripts_run_for_atp(tmp_path):
@@ -189,6 +355,55 @@ def test_generate_and_eval_scripts_run_for_atp(tmp_path):
     assert int(evaluated['targets']) == 10
 
 
+def test_atp_generate_script_reaches_terminals_and_reports_original_motif(
+    tmp_path,
+    monkeypatch,
+):
+    class TerminalModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(vocab_size=32, n_ctx=8)
+
+        def forward(self, sequence, attention_mask=None):
+            logits = torch.zeros(sequence.size(0), sequence.size(1), 64)
+            logits[..., 1] = 20.0
+            logits[..., 32 + 2] = 20.0
+            return logits
+
+    tokenizer_path = write_uniref_tokenizer(tmp_path)
+    binding_path = tmp_path / 'proteins.tsv'
+    binding_path.write_text(
+        'Sequence\tBinding site\nACDEFG\tBINDING 1..6\n',
+        encoding='utf-8',
+    )
+    output_path = tmp_path / 'generated-atp-complete.tsv'
+    monkeypatch.setattr(
+        generate_script,
+        'load_model_checkpoint',
+        lambda *args, **kwargs: TerminalModel(),
+    )
+
+    generate_script.main(
+        [
+            '--weights', str(tmp_path / 'unused.pt'),
+            '--data', str(binding_path),
+            '--tokenizer', str(tokenizer_path),
+            '--device', 'cpu',
+            '--model_type', 'atp',
+            '--sample', 'greedy',
+            '--max-samples', '1',
+            '--output', str(output_path),
+        ]
+    )
+
+    result = next(csv.DictReader(output_path.open(), delimiter='\t'))
+    assert result['complete'] == 'True'
+    assert result['sequence']
+    assert ' ' not in result['sequence']
+    assert '?' not in result['sequence']
+    assert result['known_indices'] == '0 1 2 3 4 5'
+
+
 class FakeGenerationConfig:
     def __init__(self, track, num_steps):
         self.track = track
@@ -225,6 +440,36 @@ def test_structure_evaluator_supports_offline_client(tmp_path):
 
     assert torch.allclose(torch.tensor(result), torch.tensor([0.6, 0.3, 0.2]))
     assert (tmp_path / 'protein.pdb').is_file()
+
+
+def test_structure_evaluator_rejects_spaced_tokenizer_output(tmp_path):
+    evaluator = StructureEvaluator(
+        'fake',
+        client=FakeClient(),
+        protein_class=FakeProtein,
+        generation_config_class=FakeGenerationConfig,
+    )
+
+    with pytest.raises(ValueError, match='without separators'):
+        evaluator.generate_structure('A C D E', [0], tmp_path / 'protein.pdb')
+
+
+def test_structure_evaluator_rejects_empty_partitions_before_remote_call(tmp_path):
+    class UnexpectedClient(FakeClient):
+        def generate(self, protein, config):
+            raise AssertionError('remote generation should not run')
+
+    evaluator = StructureEvaluator(
+        'fake',
+        client=UnexpectedClient(),
+        protein_class=FakeProtein,
+        generation_config_class=FakeGenerationConfig,
+    )
+
+    with pytest.raises(ValueError, match='non-generated residue'):
+        evaluator.generate_structure('ACDE', [], tmp_path / 'protein.pdb')
+    with pytest.raises(ValueError, match='No generated residues'):
+        evaluator.generate_structure('ACDE', range(4), tmp_path / 'protein.pdb')
 
 
 class FakeEvaluator:
@@ -296,6 +541,26 @@ def test_structure_driver_records_errors_without_undefined_metrics(tmp_path):
     assert (successful, failed) == (0, 1)
     assert row['ptm'] == ''
     assert row['error'] == 'RuntimeError: expected failure'
+
+
+def test_structure_driver_returns_failure_status_when_any_record_fails(tmp_path):
+    class FailingEvaluator:
+        def generate_structure(self, **kwargs):
+            raise RuntimeError('expected failure')
+
+    input_path = tmp_path / 'completion.tsv'
+    write_completion_tsv(input_path)
+
+    exit_code = structure_evaluator_driver.main(
+        [
+            '--input', str(input_path),
+            '--output', str(tmp_path / 'failed.tsv'),
+            '--pdb-dir', str(tmp_path / 'pdb'),
+        ],
+        evaluator_factory=lambda model_id, api_key: FailingEvaluator(),
+    )
+
+    assert exit_code == 1
 
 
 def test_plotting_drivers_parse_inputs_and_call_plot_functions(tmp_path):

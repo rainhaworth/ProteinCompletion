@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 
 VALID_AAS = 'ACDEFGHIKLMNPQRSTVWY'
@@ -6,7 +7,12 @@ VALID_AAS = 'ACDEFGHIKLMNPQRSTVWY'
 
 def cross_entropy_to_perplexity(cross_entropy):
     """Convert natural-log cross-entropy to conventional perplexity."""
-    return np.exp(cross_entropy)
+    if torch.is_tensor(cross_entropy):
+        perplexity = torch.exp(cross_entropy.detach()).cpu()
+        return perplexity.item() if perplexity.numel() == 1 else perplexity.numpy()
+
+    perplexity = np.exp(cross_entropy)
+    return perplexity.item() if np.ndim(perplexity) == 0 else perplexity
 
 
 def amino_acid_composition_entropy(sequence, ignore_indices=()):

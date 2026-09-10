@@ -10,11 +10,13 @@ import torch
 from utils.data import ProteinBindingOnlyData
 from utils.evaluation import normalize_model_type, score_atp_logits, score_esm_logits
 from utils.generation import (
+    decode_token_ids,
+    decode_visible_token_ids,
     gen_step_atp,
     gen_step_esmlike,
     make_inference_mask,
-    make_mlm_input,
     make_sample_fn,
+    resolve_terminal_ids,
     update_generation_state,
 )
 from utils.metrics import cross_entropy_to_perplexity
@@ -55,9 +57,13 @@ def build_parser():
     )
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
     parser.add_argument('--p', type=float, default=0.95, help='Nucleus probability threshold')
-    parser.add_argument('--rep-window', type=int, default=4)
-    parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--max-samples', type=int, default=15)
+    parser.add_argument(
+        '--motif-dropout',
+        type=float,
+        default=0.0,
+        help='Optional dropout applied to annotated TSV motif positions.',
+    )
     parser.add_argument(
         '--max-steps',
         type=int,
@@ -67,7 +73,8 @@ def build_parser():
     return parser
 
 
-def full_sequence_score(model, seq, model_type, device):
+def fully_visible_reconstruction_score(model, seq, model_type, device):
+    """Score token reconstruction with every sequence position visible."""
     with torch.inference_mode():
         if model_type == 'atp':
             known = torch.arange(seq.size(1), device=device)
@@ -82,11 +89,37 @@ def full_sequence_score(model, seq, model_type, device):
     return cross_entropy, float(cross_entropy_to_perplexity(cross_entropy)), accuracy
 
 
-def display_sequence(seq, idxs, complete, model_type, tokenizer, mask_id=None):
-    shown = seq
-    if model_type == 'esm' and not complete:
-        shown = make_mlm_input(seq, idxs, mask_id)
-    return tokenizer.decode(shown.squeeze(0).detach().cpu().tolist())
+def prepare_generation_output(
+    seq,
+    visible_indices,
+    motif_indices,
+    tokenizer,
+    complete,
+    bos_id,
+    eos_id,
+):
+    """Remove terminal tokens and preserve the original motif coordinates."""
+    token_ids = seq.squeeze(0)
+    start = int(token_ids.numel() > 0 and token_ids[0].item() == bos_id)
+    end = token_ids.numel() - int(
+        token_ids.numel() > start and token_ids[-1].item() == eos_id
+    )
+    output_ids = token_ids[start:end]
+
+    def shift_and_filter(indices):
+        indices = torch.as_tensor(indices, dtype=torch.long, device=seq.device).reshape(-1)
+        indices = indices[(indices >= start) & (indices < end)] - start
+        return torch.unique(indices, sorted=True)
+
+    output_visible = shift_and_filter(visible_indices)
+    output_motif = shift_and_filter(motif_indices)
+    if complete:
+        sequence = decode_token_ids(tokenizer, output_ids)
+    else:
+        sequence = decode_visible_token_ids(
+            tokenizer, output_ids, output_visible
+        )
+    return sequence, output_motif, output_visible
 
 
 def main(argv=None):
@@ -95,6 +128,8 @@ def main(argv=None):
         raise ValueError('--max-samples must be positive')
     if args.max_steps < 0:
         raise ValueError('--max-steps cannot be negative')
+    if not 0 <= args.motif_dropout <= 1:
+        raise ValueError('--motif-dropout must be between 0 and 1')
 
     set_env()
     set_seed(args.rng_seed, deterministic=args.rng_deterministic)
@@ -119,6 +154,7 @@ def main(argv=None):
         ).eval()
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file=args.tokenizer)
+        bos_id, eos_id = resolve_terminal_ids(tokenizer)
         mask_id = None
         if model_type == 'esm':
             mask_id = tokenizer.token_to_id('<mask>')
@@ -137,6 +173,7 @@ def main(argv=None):
             max_dim=model.config.n_ctx,
             max_samples=args.max_samples,
             keep_len=keep_length,
+            motif_dropout=args.motif_dropout,
         )
     if not dataset:
         raise ValueError(f'No sequences were loaded from {args.data}')
@@ -149,7 +186,7 @@ def main(argv=None):
         for record_id, (seq, idxs) in enumerate(dataset, start=1):
             seq = seq[None, :].to(device)
             idxs = torch.as_tensor(idxs, dtype=torch.long, device=device).reshape(-1)
-            stopped_naturally = False
+            motif_indices = idxs.clone()
 
             for _ in range(step_limit):
                 new_token, new_pos = generation_step(
@@ -158,30 +195,45 @@ def main(argv=None):
                     idxs,
                     device,
                     invalid_ids,
-                    rp=args.rep_penalty,
-                    rw=args.rep_window,
                     sample_fn=sample_fn,
-                    **({'mask_id': mask_id} if model_type == 'esm' else {}),
+                    **(
+                        {'mask_id': mask_id}
+                        if model_type == 'esm'
+                        else {'bos_id': bos_id, 'eos_id': eos_id}
+                    ),
                 )
                 if new_token is None:
-                    stopped_naturally = True
                     break
+                if int(torch.as_tensor(new_pos).item()) == -1:
+                    motif_indices = motif_indices + 1
                 seq, idxs = update_generation_state(
                     seq, idxs, new_token, new_pos
                 )
                 if seq.size(1) >= model.config.n_ctx and model_type == 'atp':
                     break
 
-            complete = (
-                idxs.numel() == seq.size(1)
-                if model_type == 'esm'
-                else stopped_naturally
+            all_positions_visible = idxs.numel() == seq.size(1)
+            has_terminals = (
+                seq.size(1) >= 2
+                and seq[0, 0].item() == bos_id
+                and seq[0, -1].item() == eos_id
             )
-            sequence = display_sequence(
-                seq, idxs, complete, model_type, tokenizer, mask_id
+            complete = (
+                all_positions_visible
+                if model_type == 'esm'
+                else all_positions_visible and has_terminals
+            )
+            sequence, output_motif, output_visible = prepare_generation_output(
+                seq,
+                idxs,
+                motif_indices,
+                tokenizer,
+                complete,
+                bos_id,
+                eos_id,
             )
             if complete:
-                cross_entropy, perplexity, accuracy = full_sequence_score(
+                cross_entropy, perplexity, accuracy = fully_visible_reconstruction_score(
                     model, seq, model_type, device
                 )
             else:
@@ -191,18 +243,23 @@ def main(argv=None):
             print('complete:', complete)
             print('sequence:', sequence)
             if complete:
-                print(f'full-sequence CE: {cross_entropy:.5f}')
-                print(f'full-sequence PPL: {perplexity:.5f}')
-                print(f'full-sequence accuracy: {accuracy:.5f}')
+                print(f'fully-visible reconstruction CE: {cross_entropy:.5f}')
+                print(f'fully-visible reconstruction PPL: {perplexity:.5f}')
+                print(f'fully-visible reconstruction accuracy: {accuracy:.5f}')
             rows.append(
                 {
                     'record_id': record_id,
                     'model_type': model_type,
                     'complete': complete,
-                    'known_indices': ' '.join(map(str, idxs.detach().cpu().tolist())),
-                    'full_sequence_cross_entropy': cross_entropy,
-                    'full_sequence_perplexity': perplexity,
-                    'full_sequence_accuracy': accuracy,
+                    'known_indices': ' '.join(
+                        map(str, output_motif.detach().cpu().tolist())
+                    ),
+                    'visible_indices': ' '.join(
+                        map(str, output_visible.detach().cpu().tolist())
+                    ),
+                    'fully_visible_reconstruction_cross_entropy': cross_entropy,
+                    'fully_visible_reconstruction_perplexity': perplexity,
+                    'fully_visible_reconstruction_accuracy': accuracy,
                     'sequence': sequence,
                 }
             )

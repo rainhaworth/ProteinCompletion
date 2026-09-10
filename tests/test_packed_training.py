@@ -4,7 +4,10 @@ import numpy as np
 import torch
 
 from utils.data import PackedUnirefData
+from utils.config import BaseConfig
 from utils.mask import diag_block_mask, idx_to_mask_targets_hanoi
+from utils.model_bidirectional import BidirectionalCausalLM
+from utils.model_esmlike import ESMlikeLM
 
 
 class TokenizerStub:
@@ -15,6 +18,23 @@ class TokenizerStub:
         if token == "<mask>":
             return self.mask_id
         return None
+
+
+def tiny_config():
+    return BaseConfig(
+        vocab_size=32,
+        n_positions=8,
+        n_ctx=8,
+        n_embd=32,
+        n_layer=2,
+        n_head=4,
+        rotary_dim=8,
+        n_inner=64,
+        resid_pdrop=0.0,
+        embd_pdrop=0.0,
+        attn_pdrop=0.0,
+        use_cache=False,
+    )
 
 
 def hidden_targets(targets):
@@ -114,7 +134,7 @@ def test_packed_atp_blocks_match_standalone_masks_exhaustively():
 
 def test_packed_esm_uses_mask_id_from_tokenizer(tmp_path):
     data_path = tmp_path / "packed.bin"
-    packed = np.memmap(data_path, mode="w+", dtype=np.float64, shape=(8,))
+    packed = np.memmap(data_path, mode="w+", dtype=np.uint8, shape=(8,))
     packed[:] = np.array([1, 4, 5, 2, 3, 1, 6, 2])
     packed.flush()
     del packed
@@ -149,3 +169,41 @@ def test_packed_esm_rejects_missing_or_conflicting_mask_ids(tmp_path):
             assert "mask" in str(exc).lower() or "tokenizer" in str(exc).lower()
         else:
             raise AssertionError("Invalid ESM tokenizer was accepted")
+
+
+def test_packed_atp_and_esm_forward_backward_are_finite(tmp_path):
+    data_path = tmp_path / 'packed.bin'
+    packed = np.memmap(data_path, mode='w+', dtype=np.uint8, shape=(8,))
+    packed[:] = np.array([1, 4, 5, 2, 3, 1, 6, 2], dtype=np.uint8)
+    packed.flush()
+    del packed
+
+    for model_type, model_class in (
+        ('atp', BidirectionalCausalLM),
+        ('esm', ESMlikeLM),
+    ):
+        torch.manual_seed(0)
+        dataset = PackedUnirefData(
+            str(data_path),
+            tokenizer=TokenizerStub(mask_id=31),
+            max_dim=8,
+            model_type=model_type,
+        )
+        sequence, targets, attention = dataset[0]
+        model = model_class(tiny_config())
+        logits = model(sequence[None, :], attention_mask=attention[None, :, :])
+        loss = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, model.config.vocab_size),
+            targets.reshape(-1),
+        )
+        loss.backward()
+
+        gradients = [
+            parameter.grad
+            for parameter in model.parameters()
+            if parameter.grad is not None
+        ]
+        assert torch.isfinite(loss)
+        assert gradients
+        assert all(torch.isfinite(gradient).all() for gradient in gradients)
+        assert any(torch.count_nonzero(gradient) for gradient in gradients)

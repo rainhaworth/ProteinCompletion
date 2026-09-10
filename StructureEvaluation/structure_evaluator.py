@@ -95,11 +95,23 @@ class StructureEvaluator:
         L = len(sequence)
         if L == 0:
             raise ValueError('sequence cannot be empty')
+        if not sequence.isalpha() or sequence != sequence.upper():
+            raise ValueError(
+                'sequence must contain uppercase residue letters without separators'
+            )
         non_generated_indices = sorted({int(i) for i in non_generated_indices})
 
         # Basic sanity check on indices
         if any(i < 0 or i >= L for i in non_generated_indices):
             raise ValueError("non_generated_indices contains out-of-range positions")
+        if not non_generated_indices:
+            raise ValueError('At least one non-generated residue is required.')
+
+        all_indices = set(range(L))
+        non_gen_set = set(non_generated_indices)
+        generated_indices = sorted(all_indices - non_gen_set)
+        if not generated_indices:
+            raise ValueError("No generated residues inferred (complement is empty).")
 
         steps = self.pick_num_steps(L)
         print(steps)
@@ -128,15 +140,6 @@ class StructureEvaluator:
         # Extract per-residue pLDDT (1D tensor of shape [L])
         plddt = protein.plddt  # torch.Tensor / array-like
 
-        # Infer generated indices (complement of non-generated)
-        all_indices = set(range(L))
-        non_gen_set = set(non_generated_indices)
-        generated_indices = sorted(all_indices - non_gen_set)
-
-        if not generated_indices:
-            raise ValueError("No generated residues inferred (complement is empty).")
-        if not non_generated_indices:
-            raise ValueError('At least one non-generated residue is required.')
         if len(plddt) != L:
             raise RuntimeError(
                 f'Expected {L} pLDDT values, received {len(plddt)}'

@@ -58,6 +58,8 @@ def tokenize_sequence(sequence, tokenizer, device):
     token_ids = tokenizer.encode(sequence).ids
     if not token_ids:
         raise ValueError('Tokenizer produced an empty sequence')
+    if len(token_ids) != len(sequence):
+        raise ValueError('Evaluation requires one token per residue')
     return torch.tensor(token_ids, dtype=torch.long, device=device)[None, :]
 
 
