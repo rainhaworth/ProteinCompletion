@@ -207,7 +207,7 @@ def diag_block_mask(mask_idxs, sep_idxs, dim=512, i2m_f=idx_to_mask_targets_hano
         sub_mask, sub_tgts = i2m_f(mask_idxs_-start_i, sep_i-start_i)
 
         # add to full
-        sub_tgts[sub_tgts>0] += start_i
+        sub_tgts[sub_tgts >= 0] += start_i
         full_mask[start_i:sep_i, start_i:sep_i] = sub_mask
         full_tgts[start_i:sep_i, :] = sub_tgts
 

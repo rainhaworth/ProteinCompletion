@@ -1,8 +1,11 @@
 # figure_generator.py
 from pathlib import Path
 import pandas as pd
-import seaborn as sns
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import seaborn as sns
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 
@@ -268,7 +271,7 @@ def generate_figures_single(
     gen_len_max = df_len_src["length"].max()
 
     # Ensure gen_pct treated as categorical with stable ordering
-    if not pd.api.types.is_categorical_dtype(df_len_src["gen_pct"]):
+    if not isinstance(df_len_src["gen_pct"].dtype, pd.CategoricalDtype):
         unique_gen = sorted(df_len_src["gen_pct"].unique())
         df_len_src["gen_pct"] = pd.Categorical(df_len_src["gen_pct"], categories=unique_gen, ordered=True)
 
@@ -346,7 +349,7 @@ def generate_figures_single(
         # -----------------------------------------
         df_group = df_len_src.copy()
 
-        if pd.api.types.is_categorical_dtype(df_group["gen_pct"]):
+        if isinstance(df_group["gen_pct"].dtype, pd.CategoricalDtype):
             gen_numeric = df_group["gen_pct"].astype(float)
         else:
             gen_numeric = df_group["gen_pct"]
@@ -446,7 +449,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
     df_esm = pd.DataFrame(esm_records)
 
     # Tag each dataset
-    df_bcm["source"] = "BCM"
+    df_bcm["source"] = "ATP"
     df_esm["source"] = "ESM"
 
     # Combine into one DataFrame
@@ -458,11 +461,11 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
         axis=1
     )
 
-    # Common style mappings: ESM red, BCM blue; contiguous solid, fragmented dashed
-    color_map = {"ESM": "red", "BCM": "blue"}
+    # Common style mappings: ESM red, ATP blue; contiguous solid, fragmented dashed
+    color_map = {"ESM": "red", "ATP": "blue"}
     style_map = {True: "-", False: "--"}
     row_order = [(False, "fragmented"), (True, "contiguous")]  # legend rows
-    col_order = [("ESM", "ESM"), ("BCM", "BCM")]  # legend columns
+    col_order = [("ESM", "ESM"), ("ATP", "ATP")]  # legend columns
 
     # ------------------------
     # pTM vs % generated (each line: model + contiguous/fragmented)
@@ -475,8 +478,8 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
     legend_handles = []
 
     # Plot lines in row-major order for legend layout:
-    # row 1: fragmented (ESM, BCM)
-    # row 2: contiguous (ESM, BCM)
+    # row 1: fragmented (ESM, ATP)
+    # row 2: contiguous (ESM, ATP)
     for contig_flag, region_label in row_order:
         for source_key, source_label in col_order:
             sub = df_ptm[(df_ptm["source"] == source_key) &
@@ -514,12 +517,12 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
         color="black",
     )
 
-    ax.set_title("pTM vs % Generated (BCM and ESM)")
+    ax.set_title("pTM vs % Generated (ATP and ESM)")
     ax.set_xlabel("% Generated")
     ax.set_ylabel("Mean pTM")
     ax.set_ylim(0.1, 0.6)  # tighter y-range as requested
 
-    # Custom legend: 2 columns (ESM, BCM), rows = fragmented/contiguous
+    # Custom legend: 2 columns (ESM, ATP), rows = fragmented/contiguous
     fig = plt.gcf()
     fig.subplots_adjust(bottom=0.25)
     ax.legend(
@@ -532,7 +535,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
     )
 
     plt.tight_layout()
-    plt.savefig(outdir / "ptm_vs_genpct_bcm_esm.png", bbox_inches="tight")
+    plt.savefig(outdir / "ptm_vs_genpct_atp_esm.png", bbox_inches="tight")
     plt.close()
 
     # ------------------------
@@ -581,7 +584,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
         color="black",
     )
 
-    ax.set_title("Generated pLDDT vs % Generated (BCM and ESM)")
+    ax.set_title("Generated pLDDT vs % Generated (ATP and ESM)")
     ax.set_xlabel("% Generated")
     ax.set_ylabel("Mean pLDDT")
     ax.set_ylim(0.4, min(plddt_scale_max, 0.8))  # tighter range as suggested
@@ -600,11 +603,11 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
     )
 
     plt.tight_layout()
-    plt.savefig(outdir / "plddt_vs_genpct_bcm_esm.png", bbox_inches="tight")
+    plt.savefig(outdir / "plddt_vs_genpct_atp_esm.png", bbox_inches="tight")
     plt.close()
 
     # ------------------------
-    # HISTOGRAMS (BCM vs ESM stacked instead of overlaid)
+    # HISTOGRAMS (ATP vs ESM stacked instead of overlaid)
     # ------------------------
 
     # Subsets by contiguous flag
@@ -656,7 +659,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
         plt.savefig(outdir / outname, bbox_inches="tight")
         plt.close()
 
-    # 1) pTM histogram — contiguous=True (BCM & ESM)
+    # 1) pTM histogram — contiguous=True (ATP & ESM)
     if not sub_true.empty:
         hist_stack(
             sub_true,
@@ -667,7 +670,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
             outname="hist_ptm_contiguous_true.png",
         )
 
-    # 2) pTM histogram — contiguous=False (BCM & ESM)
+    # 2) pTM histogram — contiguous=False (ATP & ESM)
     if not sub_false.empty:
         hist_stack(
             sub_false,
@@ -678,7 +681,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
             outname="hist_ptm_contiguous_false.png",
         )
 
-    # 3) Generated pLDDT histogram — contiguous=True (BCM & ESM)
+    # 3) Generated pLDDT histogram — contiguous=True (ATP & ESM)
     if not sub_true.empty:
         hist_stack(
             sub_true,
@@ -689,7 +692,7 @@ def generate_figures_combined(bcm_records, esm_records, original_tsv, outdir, pl
             outname="hist_plddt_generated_contiguous_true.png",
         )
 
-    # 4) Generated pLDDT histogram — contiguous=False (BCM & ESM)
+    # 4) Generated pLDDT histogram — contiguous=False (ATP & ESM)
     if not sub_false.empty:
         hist_stack(
             sub_false,
@@ -727,7 +730,7 @@ def plot_length_genpct_metric_all(
     df_orig = pd.DataFrame(orig_records)
 
     # Tag sources
-    df_bcm["source"] = "BCM"
+    df_bcm["source"] = "ATP"
     df_esm["source"] = "ESM"
 
     # Combined DataFrame for generated-completion experiments
@@ -791,7 +794,7 @@ def plot_length_genpct_metric_all(
             df["length"] = df["seq"].astype(str).str.len()
         else:
             raise ValueError(
-                "bcm/esm records must include 'length' or 'seq' to plot vs length."
+                "ATP/ESM records must include 'length' or 'seq' to plot vs length."
             )
 
     gen_len_min = df["length"].min()
@@ -804,7 +807,7 @@ def plot_length_genpct_metric_all(
     ]
 
     # Ensure gen_pct is treated as categorical with a stable ordering
-    if not pd.api.types.is_categorical_dtype(df["gen_pct"]):
+    if not isinstance(df["gen_pct"].dtype, pd.CategoricalDtype):
         unique_gen = sorted(df["gen_pct"].unique())
         df["gen_pct"] = pd.Categorical(df["gen_pct"], categories=unique_gen, ordered=True)
 
@@ -857,7 +860,7 @@ def plot_length_genpct_metric_all(
     df_group = df.copy()
 
     # Work with numeric gen_pct values
-    if pd.api.types.is_categorical_dtype(df_group["gen_pct"]):
+    if isinstance(df_group["gen_pct"].dtype, pd.CategoricalDtype):
         gen_numeric = df_group["gen_pct"].astype(float)
     else:
         gen_numeric = df_group["gen_pct"]

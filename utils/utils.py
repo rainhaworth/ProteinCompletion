@@ -80,13 +80,13 @@ def load_model_compat(model_class, config_file, device, states=None):
             drop_lm_head = True
 
         # drop any unused keys
-        state_dict = states['model_state']
-        keys_to_del = []
-        for key in state_dict.keys():
-            if 'attn.bias' in key or 'attn.masked_bias' in key or (drop_lm_head and key[:7] == 'lm_head'):
-                keys_to_del.append(key)
-        for key in keys_to_del:
-            del state_dict[key]
+        state_dict = {
+            key: value
+            for key, value in states['model_state'].items()
+            if 'attn.bias' not in key
+            and 'attn.masked_bias' not in key
+            and not (drop_lm_head and key.startswith('lm_head'))
+        }
 
         model.load_state_dict(state_dict)
     else:
@@ -95,6 +95,28 @@ def load_model_compat(model_class, config_file, device, states=None):
     
     model.to(device)
     
+    return model
+
+def load_model_checkpoint(model_class, config_file, device, checkpoint):
+    """Load either a training checkpoint dictionary or a serialized model."""
+    if not checkpoint or not os.path.isfile(checkpoint):
+        raise FileNotFoundError(f'Model checkpoint not found: {checkpoint}')
+
+    saved = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    if isinstance(saved, torch.nn.Module):
+        if not isinstance(saved, model_class):
+            raise ValueError(
+                f'Checkpoint contains {type(saved).__name__}, but '
+                f'{model_class.__name__} was requested'
+            )
+        model = saved.to(device)
+    elif isinstance(saved, dict) and 'model_state' in saved:
+        model = load_model_compat(model_class, config_file, device, saved)
+    else:
+        raise ValueError(
+            'Unsupported checkpoint format. Expected a model or a dictionary '
+            'containing model_state.'
+        )
     return model
 
 # transformer LR scheduler, from https://huggingface.co/transformers/v4.4.2/_modules/transformers/optimization.html#get_linear_schedule_with_warmup

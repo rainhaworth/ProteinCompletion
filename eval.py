@@ -1,225 +1,203 @@
-# simple PPL + accuracy eval
-import numpy as np
+"""Evaluate ATP adjacent-token scoring or ESM masked-residue recovery."""
+
 import argparse
-import json
+import csv
+import os
 
 import torch
-from utils.model_bidirectional import BidirectionalCausalLM
-from utils.config import BaseConfig
 
-# import custom dataset
 from utils.data import make_gen_from_ext
-from utils.mask import idx_to_segments
-from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom
-
-# import generation step function
-from generate import gen_step, make_inference_mask, greedy_sample, nucleus_sample
-
-from tqdm import tqdm
-
-
-PAD_ID = 0
-BOS_ID = 1
-EOS_ID = 2
-MAX_ID = 29
-
-
-def cross_entropy_2way(seq, logits):
-    half_sz = logits.size(-1) // 2
-    p_logits = logits[1:,:half_sz]
-    n_logits = logits[:-1,half_sz:]
-    p_toks = seq[0,:-1]
-    n_toks = seq[0,1:]
-
-    ce = [torch.nn.functional.cross_entropy(p_logits, p_toks), torch.nn.functional.cross_entropy(n_logits, n_toks)]
-    #ce /= 2
-    ce = np.array([x.numpy(force=True) for x in ce])
-    return ce
-
-def seq_to_ce(seq, model, tokenizer, device):
-    idxs = list(range(len(seq)))
-    seq = tokenizer.encode(seq).ids
-    seq = torch.tensor(seq).to(device)
-    seq = seq[None,:]
-
-    mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
-    logits = model(seq, attention_mask=mask).logits
-    logits = torch.squeeze(logits, 0)
-
-    ce = cross_entropy_2way(seq, logits)
-    return ce
+from utils.evaluation import normalize_model_type, score_atp_logits, score_esm_logits
+from utils.generation import make_inference_mask, make_mlm_input
+from utils.metrics import cross_entropy_to_perplexity
+from utils.model_bidirectional import BidirectionalCausalLM
+from utils.model_esmlike import ESMlikeLM
+from utils.utils import (
+    create_tokenizer_custom,
+    load_model_checkpoint,
+    print_time,
+    set_env,
+    set_seed,
+)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='./weights/model.pt')
-    parser.add_argument('--device', type=str, default='cuda:0')
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description='Score ATP adjacent-token predictions or ESM masked residues.'
+    )
+    parser.add_argument('--weights', required=True, help='Training checkpoint or serialized model')
+    parser.add_argument('--data', required=True, help='Input FASTA or TSV')
+    parser.add_argument('--output', default='', help='Optional per-sequence TSV output')
+    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--config', default='./config-medium.json')
+    parser.add_argument('--tokenizer', default='./tokenizer-uniref.json')
+    parser.add_argument(
+        '--model_type',
+        choices=['atp', 'esm', 'bidirectional', 'esmlike'],
+        default='atp',
+    )
+    parser.add_argument('--max-samples', type=int, default=100)
+    parser.add_argument('--min-length', type=int, default=2)
+    parser.add_argument('--max-length', type=int, default=1000)
+    parser.add_argument(
+        '--mask-fraction',
+        type=float,
+        default=0.15,
+        help='Fraction of positions hidden when evaluating ESM.',
+    )
     parser.add_argument('--rng-seed', type=int, default=42)
-    parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--p', type=float, default=0.95)
-    parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
-    parser.add_argument('--max-steps', type=int, default=50)
-    parser.add_argument('--rep-window', type=int, default=4)
-    parser.add_argument('--rep-penalty', type=float, default=1.2)
-    parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
-    parser.add_argument('--max-window', type=int, default=-1)
-    parser.add_argument('--acc', type=lambda x: (str(x).lower() == 'true'), default=False)
-    parser.add_argument('--config', type=str, default='./config-medium.json')
-    args = parser.parse_args()
+    parser.add_argument(
+        '--rng-deterministic',
+        default=True,
+        type=lambda value: str(value).lower() == 'true',
+    )
+    return parser
 
+
+def tokenize_sequence(sequence, tokenizer, device):
+    token_ids = tokenizer.encode(sequence).ids
+    if not token_ids:
+        raise ValueError('Tokenizer produced an empty sequence')
+    if len(token_ids) != len(sequence):
+        raise ValueError('Evaluation requires one token per residue')
+    return torch.tensor(token_ids, dtype=torch.long, device=device)[None, :]
+
+
+def score_sequence(model, seq, model_type, device, mask_fraction=0.15, mask_id=None):
+    with torch.inference_mode():
+        if model_type == 'atp':
+            known = torch.arange(seq.size(1), device=device)
+            attention_mask = make_inference_mask(
+                seq.size(1), known, device, seq.size(1)
+            )
+            return score_atp_logits(
+                seq, model(seq, attention_mask=attention_mask)
+            )
+
+        target_count = max(1, min(seq.size(1), round(seq.size(1) * mask_fraction)))
+        target_indices = torch.randperm(seq.size(1), device=device)[:target_count]
+        if mask_id is None:
+            raise ValueError('ESM scoring requires the tokenizer mask ID')
+        known = torch.ones(seq.size(1), dtype=torch.bool, device=device)
+        known[target_indices] = False
+        model_input = make_mlm_input(seq, torch.nonzero(known).squeeze(-1), mask_id)
+        logits = model(model_input, attention_mask=None)
+        result = score_esm_logits(seq, logits, target_indices)
+        result['target_indices'] = target_indices
+        return result
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.max_samples <= 0:
+        raise ValueError('--max-samples must be positive')
+    if args.min_length < 1 or args.max_length < args.min_length:
+        raise ValueError('Invalid sequence-length bounds')
+    if not 0 < args.mask_fraction <= 1:
+        raise ValueError('--mask-fraction must be greater than 0 and at most 1')
 
     set_env()
     set_seed(args.rng_seed, deterministic=args.rng_deterministic)
-
-    if not torch.cuda.is_available():
-        print('falling back to cpu')
+    if not torch.cuda.is_available() and str(args.device).startswith('cuda'):
+        print('CUDA is unavailable; using CPU')
         args.device = 'cpu'
-
     device = torch.device(args.device)
-
-    if device.type == 'cpu':
-        print('falling back to fp32')
-        args.fp16 = False
-
-    # load everything
+    model_type = normalize_model_type(args.model_type)
+    model_class = BidirectionalCausalLM if model_type == 'atp' else ESMlikeLM
 
     with print_time('loading model'):
-        model = torch.load(args.weights, weights_only=False)
-        # if dict, expect config arg to be provided
-        if type(model) is dict:
-            dt = model
-            with open(args.config, 'r') as f:
-                cj = json.load(f)
-            config = BaseConfig(
-                cj['vocab_size'],
-                cj['n_positions'],
-                cj['n_ctx'],
-                cj['n_embd'],
-                cj['n_layer'],
-                cj['n_head'],
-                resid_pdrop=cj['resid_pdrop'],
-                embd_pdrop=cj['embd_pdrop'],
-                attn_pdrop=cj['embd_pdrop'],
-                use_cache=False,
-                bos_token_id=1,
-                eos_token_id=2
-            )
-            model = BidirectionalCausalLM(config)
-            model.load_state_dict(dt['model_state'])
-            model.to(device)
-
+        model = load_model_checkpoint(
+            model_class, args.config, device, args.weights
+        ).eval()
     with print_time('loading tokenizer'):
-        tokenizer = create_tokenizer_custom(file='tokenizer.json')
-
-    # load dataset
-
-    with print_time('loading datasets'):
+        tokenizer = create_tokenizer_custom(args.tokenizer)
+        mask_id = tokenizer.token_to_id('<mask>') if model_type == 'esm' else None
+        if model_type == 'esm' and mask_id is None:
+            raise ValueError('Tokenizer does not define a <mask> token')
+    with print_time('loading dataset'):
         dataset = make_gen_from_ext(args.data)
 
-    # run eval
-
-    model.eval()
+    rows = []
+    total_cross_entropy = 0.0
+    total_correct = 0.0
+    total_targets = 0
+    previous_sequence = None
 
     with print_time('evaluating'):
-        n = 0
-        prev_seq = None
-        ppls = []
-        i = 0
-        for seq, _ in dataset:
-            i += 1
-            #if i < 100000: continue
-            if seq == prev_seq: continue
-            if len(seq) > 500 or len(seq) > 5000: continue
-            else: prev_seq = seq
-            print('seq:', seq)
+        for sequence, _ in dataset:
+            if sequence == previous_sequence:
+                continue
+            previous_sequence = sequence
+            if not args.min_length <= len(sequence) <= args.max_length:
+                continue
 
-            ce = seq_to_ce(seq, model, tokenizer, device)
+            seq = tokenize_sequence(sequence, tokenizer, device)
+            if seq.size(1) > model.config.n_ctx:
+                continue
+            result = score_sequence(
+                model, seq, model_type, device, args.mask_fraction, mask_id
+            )
+            cross_entropy = float(result['cross_entropy'].detach().cpu())
+            accuracy = float(result['accuracy'].detach().cpu())
+            targets = int(result['targets'])
+            total_cross_entropy += cross_entropy * targets
+            total_correct += accuracy * targets
+            total_targets += targets
 
-            print('CE:\t', ce)
-            print('PPL:\t', 2 ** ce)
-            ppls.append(2**ce)
+            row = {
+                'record_id': len(rows) + 1,
+                'length': seq.size(1),
+                'targets': targets,
+                'cross_entropy': cross_entropy,
+                'perplexity': float(cross_entropy_to_perplexity(cross_entropy)),
+                'accuracy': accuracy,
+                'sequence': sequence,
+            }
+            if model_type == 'esm':
+                row['target_indices'] = ' '.join(
+                    map(str, result['target_indices'].detach().cpu().tolist())
+                )
+            else:
+                row['previous_cross_entropy'] = float(
+                    result['previous_cross_entropy'].detach().cpu()
+                )
+                row['next_cross_entropy'] = float(
+                    result['next_cross_entropy'].detach().cpu()
+                )
+            rows.append(row)
+            print(
+                f"record {row['record_id']} length={row['length']} "
+                f"CE={cross_entropy:.5f} accuracy={accuracy:.5f}"
+            )
+            if len(rows) >= args.max_samples:
+                break
 
-            # TODO: soft acc
+    if not rows:
+        raise ValueError('No sequences satisfied the evaluation filters')
 
-            if args.acc:
-                # prepare for acc computation
-                seq = tokenizer.encode(seq).ids
-                seq = [BOS_ID] + seq + [EOS_ID]
-                seqlen = len(seq)
-                seq = torch.tensor(seq).to(device)
-                seq = seq[None,:]
-                idxs = torch.tensor(list(range(seqlen)))
-                
-                #print(seq)
+    mean_cross_entropy = total_cross_entropy / total_targets
+    mean_accuracy = total_correct / total_targets
+    print(f'token-weighted cross-entropy: {mean_cross_entropy:.5f}')
+    print(
+        'token-weighted perplexity:',
+        f'{float(cross_entropy_to_perplexity(mean_cross_entropy)):.5f}',
+    )
+    print(f'token-weighted accuracy: {mean_accuracy:.5f}')
 
-                # acc starting from random subseq of length 5
-                w_init = 5
-                w = w_init
-                sub_start = np.random.randint(seqlen-w-1)
-                subseq = seq[:,sub_start:sub_start+w]
-                acc_r = 0.0
-                for _ in tqdm(range(w, seqlen)):
-                    # normal generation
-                    new_token, new_pos = gen_step(model, subseq, idxs[:w], device)
-                    
-                    # update subseq
-                    if new_pos == -1:
-                        sub_start -= 1
-                        tgt = seq[0, sub_start]
-                        #print(seq[0, sub_start-w_init:sub_start+w_init], new_token)
-                    else:
-                        tgt = seq[0, sub_start + w]
-                        #print(seq[0, sub_start+w-w_init:sub_start+w+w_init], new_token)
-                    w += 1
-                    
-                    #print(i, w, sub_start, w+sub_start, new_token, tgt, new_pos)
-                    subseq = seq[:,sub_start:sub_start+w]
-                    #print(subseq)
+    if args.output:
+        output_path = os.path.abspath(args.output)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        fieldnames = list(rows[0])
+        for row in rows[1:]:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        with open(output_path, 'w', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter='\t')
+            writer.writeheader()
+            writer.writerows(rows)
+        print('saved to', output_path)
 
-                    acc_r += (new_token == tgt)#.numpy(force=True)
-                
-                print('hard acc r:', acc_r.numpy(force=True) / (seqlen-w_init))
-
-                # forward only acc
-                acc_f = 0.0
-                for i in tqdm(range(1,seqlen-0)):
-                    # get predictions
-                    subseq = seq[:,:i]
-                    logits, _ = gen_step(model, subseq, idxs[:i], device, return_logits=True)
-
-                    # use raw prediction weight for next token as accuracy
-                    acc_f += (torch.argmax(logits[-1]) == seq[0,i]).numpy(force=True)
-                
-                print('hard acc f:', acc_f / seqlen)
-                
-                # backward only acc
-                acc_b = 0.0
-                for i in tqdm(range(1,seqlen-0)):
-                    # get predictions
-                    subseq = seq[:,-i:]
-                    logits, _ = gen_step(model, subseq, idxs[:i], device, return_logits=True)
-
-                    # use raw prediction weight for next token as accuracy
-                    acc_b += (torch.argmax(logits[0]) == seq[0,-i-1]).numpy(force=True)
-                
-                print('hard acc b:', acc_b / seqlen)
-
-            print()
-
-            n += 1
-            if n > 100: break
-        print('mean PPL:', np.mean(np.concatenate(ppls)))
-        
-        seq = '1MGHGVSRPPVVTLRPAVLDDCPVLWRWRNDPETRQASVDEREIPVDTHTRWFEETLKRFDRKLFIVSADGVDAGMVRLDIQDRDAAVSVNIAPEWRGRGVGPRALGCLSREAFGPLALLRMSAVVKRENAASRIAFERAGFTVVDTGGPLLHSSKARLHVVAAIQARMGSTRLPGKVLVSIAGRPTIQRIAERLAVCQELDAVAVSTSVENRDDAIADLAAHLGLVCVRGSETDLIERLGRTAARTGADALVRITADCPLVDPALVDRVVGVWRRSAGRLEYVSNVFPPTFPDGLDVEVLSRTVLERLDREVSDPFFRESLTAYVREHPAAFEIANVEHPEDLSRLRWTMDYPEDLAFVEAVYRRLGNQGEIFGMDDLLRLLEWSPELRDLNRCREDVTVERGIRGTGYHAALRARGQAP2'
-        print('baseline:', seq)
-
-        ce = seq_to_ce(seq, model, tokenizer, device)
-
-        print('CE:\t', ce)
-        print('PPL:\t', 2 ** ce, end='\n\n')
 
 if __name__ == '__main__':
     main()
-    print('done.')
