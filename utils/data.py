@@ -83,11 +83,12 @@ def apply_dropout(idxs, p_drop=0.2):
 
 # training dataset
 class PackedUnirefData(Dataset):
-    def __init__(self, file, tokenizer=None, max_dim=512, max_samples=None, p_drop=None, start_seq_idx=None, model_type='atp'):
+    def __init__(self, file, tokenizer=None, max_dim=512, max_samples=None, p_drop=None, start_seq_idx=None, model_type='atp', flip_frac=False):
         # all none arguments are unused, only present to avoid breaking anything
         self.max_dim = max_dim
         self.data_path = file
         self.model_type = model_type
+        self.flip_frac = flip_frac
         self.mask_id = None
         if self.model_type == 'esm':
             if tokenizer is None:
@@ -122,6 +123,9 @@ class PackedUnirefData(Dataset):
             frac = self.uniform.sample()
         else:
             frac = self.beta.sample()
+
+        # hack for ablation study: flip frac to match ATP context size to ESM and vice versa
+        if self.flip_frac: frac = 1.0 - frac
 
         # generate mask_idxs with min + max per seq (long, hard to vectorize)
 

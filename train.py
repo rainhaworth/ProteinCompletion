@@ -20,13 +20,14 @@ def main():
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--tokenizer', type=str, default='./tokenizer-uniref.json')
     parser.add_argument('--save', type=str, default='./weights')
-    parser.add_argument('--bsz', type=int, default=8)
+    parser.add_argument('--bsz', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--total-steps', type=int, default=250000) # specify total training step count for LR scheduling
     parser.add_argument('--warmup-steps', type=int, default=5000)
     parser.add_argument('--save-every', type=int, default=20000)
     parser.add_argument('--ckpt', type=str, default='')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
+    parser.add_argument('--flip', action='store_true')
     args = parser.parse_args()
 
     set_env()
@@ -74,7 +75,7 @@ def main():
             tokenizer = create_tokenizer_custom(args.tokenizer)
 
     with print_time('loading samples from ' + args.data):
-        train_dataset = PackedUnirefData(args.data, tokenizer=tokenizer, max_dim=model.config.n_ctx, model_type=args.model_type)
+        train_dataset = PackedUnirefData(args.data, tokenizer=tokenizer, max_dim=model.config.n_ctx, model_type=args.model_type, flip_frac=args.flip)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -88,6 +89,9 @@ def main():
     optimizer, lr_scheduler = load_train_config(model, args.warmup_steps, num_training_steps, states)
 
     loss_fn = torch.nn.CrossEntropyLoss()
+
+    save_pre = 'train-' + args.model_type
+    if args.flip: save_pre += '-flip'
 
     model.compile()
     model.train()
@@ -131,7 +135,7 @@ def main():
 
                 # save every N steps
                 if step_count % save_every == 0:
-                    save_path = os.path.join(args.save, 'train-' + args.model_type + '-step' + str(step_count) + '.pt')
+                    save_path = os.path.join(args.save, save_pre + '-step' + str(step_count) + '.pt')
                     torch.save({
                         'step': step_count,
                         'model_state': model.state_dict(),
