@@ -1,0 +1,43 @@
+{
+  "status": "provisional pipeline pilots, not an approved evaluation set",
+  "panel_sha256": "ca6608152c3931b72de43df6b228ac4dc2194b58243c1a4da5383060dc893ee2",
+  "cases": [
+    {
+      "accession": "A0A0H2XJL0",
+      "reference_pdb": "9C0L",
+      "assembly_id": "1",
+      "reference_author_chain": "A",
+      "uniprot_positions_1based": [93, 190, 220],
+      "expected_residue_letters": ["S", "D", "H"],
+      "reference_author_residues": ["93", "190", "220"],
+      "site": "serine-hydrolase catalytic triad",
+      "ligand_comp_id": null,
+      "review_note": "Apo monomer. UniProt active-site annotations are inferred, not individually established by this PDB; use for geometry pipeline testing."
+    },
+    {
+      "accession": "I6YFP0",
+      "reference_pdb": "9DRN",
+      "assembly_id": "1",
+      "reference_author_chain": "B",
+      "comparison_author_chain": "A",
+      "uniprot_positions_1based": [38, 39, 63, 67, 138],
+      "expected_residue_letters": ["S", "T", "Q", "R", "K"],
+      "reference_author_residues": ["38", "39", "63", "67", "138"],
+      "site": "annotated biotin-binding residues",
+      "ligand_comp_id": "A1BGF",
+      "review_note": "Assembly 1 uses deposited label chain A, author chain B. The bound molecule is a biotin analog, not biotin."
+    },
+    {
+      "accession": "Q9F663",
+      "reference_pdb": "9F0V",
+      "assembly_id": "1",
+      "reference_author_chain": "A",
+      "uniprot_positions_1based": [69, 72, 129, 165],
+      "expected_residue_letters": ["S", "K", "S", "E"],
+      "reference_author_residues": ["70", "73", "130", "166"],
+      "site": "annotated beta-lactamase catalytic residues",
+      "ligand_comp_id": "A1H8R",
+      "review_note": "Monomer with a benzoxaborole inhibitor, not a beta-lactam substrate. SIFTS maps these UniProt positions to author residue numbers one higher. The reference omits some residues present in the full UniProt sequence."
+    }
+  ]
+}

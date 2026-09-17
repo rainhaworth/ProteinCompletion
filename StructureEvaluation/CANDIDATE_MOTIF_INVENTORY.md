@@ -46,3 +46,43 @@ Even parallel generation does not necessarily reproduce the same multilayer
 hidden states, because other rows can have narrower context in packed training.
 The diagnostic does not measure sequence quality or replace a comparison with
 the corrected checkpoint.
+
+## Reference-geometry pilots
+
+`pilot_motifs.json` contains three provisional residue sets for testing the
+structure-scoring code. They are not the final evaluation set.
+
+| UniProt / PDB | Assembly and author chain | UniProt positions | Why this is a useful pilot | Limit |
+| --- | --- | --- | --- | --- |
+| A0A0H2XJL0 / [9C0L](https://www.rcsb.org/structure/9C0L) | 1 / A | 93, 190, 220 | Catalytic triad, nearly complete monomer structure | Apo structure; site annotations are inferred |
+| I6YFP0 / [9DRN](https://www.rcsb.org/structure/9DRN) | 1 / B | 38, 39, 63, 67, 138 | Biotin-site residues near a bound biotin analog | Analog rather than biotin; author chain B is label chain A |
+| Q9F663 / [9F0V](https://www.rcsb.org/structure/9F0V) | 1 / A | 69, 72, 129, 165 | Catalytic residues in an inhibitor-bound monomer | Inhibitor rather than beta-lactam substrate; author residue IDs are shifted by one |
+
+To run the local preflight, download the three public mmCIF files and check
+them against the recorded residue mappings:
+
+```powershell
+New-Item -ItemType Directory -Path data/reference_cif -Force | Out-Null
+foreach ($pdb in @('9C0L', '9DRN', '9F0V')) {
+    Invoke-WebRequest "https://files.rcsb.org/download/$pdb.cif" -OutFile "data/reference_cif/$pdb.cif"
+}
+python -m StructureEvaluation.reference_geometry data/reference_cif
+```
+
+The command writes `data/pilot_reference_geometry.json`. All three reference
+motifs have the expected residue identities and C-alpha coordinates in their
+selected assemblies. Self-comparison produces effectively zero aligned motif
+C-alpha RMSD. In 9DRN, nearest heavy-atom distances from the five selected
+residues to the bound analog are 2.64–3.30 Å. Comparing its two deposited
+protein chains gives a 0.182 Å motif C-alpha RMSD. These checks validate
+numbering, chain selection, and geometry code; they do not measure prediction
+quality or binding. The code can compare a future full-length AF3 mmCIF file
+against these references, but AF3 output numbering must be checked first.
+The preflight reads deposited coordinates and checks assembly membership; it
+does not build transformed multichain assemblies or score inter-chain contacts.
+
+The remaining panel entries have not been biologically curated. In particular,
+P0AEX9/9BOI should not be used as a structural reference in its present form.
+The [9J2L](https://www.rcsb.org/structure/9J2L) entry contains Fe(II), while
+the mapped UniProt site annotations concern Zn(II), so those site labels
+should not be treated as evidence for the observed metal environment.
