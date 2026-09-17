@@ -1,10 +1,13 @@
 import json
+import gzip
 
+import StructureEvaluation.candidate_motif_panel as panel_module
 from StructureEvaluation.candidate_motif_panel import (
     candidate_features,
     exact_position_range,
     parse_sifts_residues,
     write_review_table,
+    inventory_record,
 )
 
 
@@ -83,3 +86,23 @@ def test_review_table_keeps_feature_identity_and_positions(tmp_path):
     assert "PTEST,9TEST,0,Active site" in content
     assert '"1,3"' in content
     assert "ECO:0000269" in content
+
+
+def test_inventory_flags_low_observed_coverage_despite_panel_claim(monkeypatch, tmp_path):
+    record = {"sequence": {"value": "ACD"}, "features": []}
+
+    def fake_fetch(url, path):
+        if "uniprotkb" in url:
+            return json.dumps(record).encode()
+        return gzip.compress(SIFTS)
+
+    monkeypatch.setattr(panel_module, "fetch_cached", fake_fetch)
+    entry = {
+        "accession": "PTEST", "reference_pdb": "9TEST", "sequence": "ACD",
+        "length": 3, "length_bin": "test", "family": "test", "ca_coverage": 1.0,
+    }
+
+    result = inventory_record(entry, tmp_path)
+
+    assert result["max_observed_uniprot_fraction"] == 0.333333
+    assert "observed_reference_mapping_below_90_percent" in result["preflight_flags"]

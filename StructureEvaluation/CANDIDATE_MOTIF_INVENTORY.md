@@ -28,8 +28,15 @@ mapped completely to at least one observed PDB chain. Of the 60 proteins, 39
 had multiple mapped chains. Most annotations were individual binding-site
 residues, so the annotation count is not a count of distinct functional motifs.
 `P0AEX9` had no observed SIFTS residues in its cited structure, `9BOI`, despite
-the panel's stated high C-alpha coverage. That reference needs manual review
-before use.
+the panel's stated C-alpha coverage of 0.917. The deposited construct is a
+fusion containing several proteins; its P0AEX9 portion is unobserved. This
+contradicts the panel manifest's claim that coverage measures modeled C-alpha
+residues. Other entries also have lower observed SIFTS coverage than the panel
+reports. The reference-structure screen needs correction before using this
+panel for structure-based scores.
+On a per-chain basis, 12 of 60 proteins have fewer than 90% of their UniProt
+positions mapped to observed residues in their nominated PDB entry. This is a
+mapping-based check, not a direct recount of C-alpha atoms from coordinates.
 
 The ATP diagnostic checks predictor-row visibility against the packed training
 mask. Parallel frontier expansion matches direct row visibility in exhaustive

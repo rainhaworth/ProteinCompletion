@@ -166,11 +166,14 @@ def inventory_record(panel_entry, cache_dir):
     chains, mismatches = parse_sifts_residues(xml, accession, pdb_id, sequence)
     features, feature_counts = candidate_features(uni, sequence, chains)
     chain_coverage = {chain: len(mapping) for chain, mapping in chains.items()}
+    max_observed_fraction = max(chain_coverage.values(), default=0) / len(sequence)
     flags = []
     if not sequence_matches:
         flags.append("panel_sequence_differs_from_current_uniprot")
     if not chains:
         flags.append("no_observed_sifts_mapping_to_panel_accession")
+    if max_observed_fraction < 0.9:
+        flags.append("observed_reference_mapping_below_90_percent")
     if mismatches:
         flags.append("sifts_residue_disagrees_with_panel_sequence")
     if not features:
@@ -186,6 +189,7 @@ def inventory_record(panel_entry, cache_dir):
         "uniprot_annotation_update_date": uni.get("entryAudit", {}).get("lastAnnotationUpdateDate"),
         "uniprot_feature_counts": feature_counts,
         "sifts_observed_residue_count_by_chain": chain_coverage,
+        "max_observed_uniprot_fraction": round(max_observed_fraction, 6),
         "sifts_uniprot_residue_mismatches": mismatches,
         "candidate_features": features,
         "preflight_flags": flags,
@@ -230,6 +234,9 @@ def build_inventory(panel_path, output_path, cache_dir, limit=None):
             ),
             "proteins_without_observed_mapping": sum(
                 not record["sifts_observed_residue_count_by_chain"] for record in records
+            ),
+            "proteins_below_90_percent_observed_mapping": sum(
+                record["max_observed_uniprot_fraction"] < 0.9 for record in records
             ),
         },
         "errors": errors,
