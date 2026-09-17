@@ -24,9 +24,10 @@ run this on a login node:
 python -c 'from pathlib import Path; from alphafold3.common import folding_input; job = folding_input.Input.from_json(Path("af3_wt_pilot.json").read_text()); assert len(job.chains) == 1 and job.rng_seeds == (1,); print("Input parsed successfully")'
 ```
 
-This parser check is still pending for the actual 246-residue input. The local
-environment does not have AlphaFold 3 installed. A shorter toy input was
-accepted by the same Zaratan module during the earlier cluster inspection.
+The 246-residue input passed this check with the installed Zaratan 3.0.1 module
+on 2026-09-17, returning `a0a0h2xjl0_wt_msa_free 1 (1,)`. This establishes
+input compatibility, not folding behavior. The local environment does not have
+AlphaFold 3 installed.
 
 On Zaratan, first confirm an active Slurm account, access to a GPU allocation,
 and the location of model parameters. The installed `alphafold3/3.0.1` module
