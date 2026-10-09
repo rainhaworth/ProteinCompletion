@@ -69,7 +69,7 @@ def main():
     parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
     parser.add_argument('--max-window', type=int, default=-1)
-    parser.add_argument('--config', type=str, default='./config-medium.json')
+    parser.add_argument('--config', type=str, default='config-medium')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     parser.add_argument('--output', default='./out.tsv')
     parser.add_argument('--id', action='store_true')
@@ -97,6 +97,8 @@ def main():
         print('falling back to fp32')
         args.fp16 = False
 
+    configf = f'./{args.config}.json'
+
     # load everything
 
     # load checkpoint if provided
@@ -112,7 +114,7 @@ def main():
         init_step = 0
 
     with print_time('loading model'):
-        model = load_model_compat(model_class, args.config, device, states)
+        model = load_model_compat(model_class, configf, device, states)
 
 
     with print_time('loading tokenizer'):
