@@ -12,7 +12,7 @@ from utils.utils import print_time, set_seed, set_env, create_tokenizer_custom, 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config-medium')
+    parser.add_argument('--config', type=str, default='config-medlarge.json')
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
@@ -38,7 +38,6 @@ def main():
         args.device = 'cpu'
 
     device = torch.device(args.device)
-    configf = f'./{args.config}.json'
     checkpoint = args.ckpt
     if args.model_type == 'atp':
         model_class = BidirectionalCausalLM
@@ -62,7 +61,7 @@ def main():
     # load model, parameters
 
     with print_time('loading model'):
-        model = load_model_compat(model_class, configf, device, states)
+        model = load_model_compat(model_class, args.config, device, states)
 
     # load dataset(s)
     

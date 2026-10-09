@@ -7,19 +7,23 @@ import os
 from utils.model_bidirectional import BidirectionalCausalLM
 from utils.model_esmlike import ESMlikeLM
 from utils.data import make_gen_from_ext
-from utils.utils import print_time, set_env, set_seed, load_model_compat, create_tokenizer_custom
-from utils.generation import gen_step_bidirectional, gen_step_esmlike, make_inference_mask, gen_step_atp
+from utils.utils import print_time, set_env, set_seed, load_model_checkpoint, create_tokenizer_custom
+from utils.generation import (
+    decode_token_ids,
+    gen_step_esmlike,
+    make_inference_mask,
+    gen_step_atp,
+    make_sample_fn,
+    resolve_terminal_ids,
+    update_generation_state,
+)
+from utils.metrics import amino_acid_composition_entropy, cross_entropy_to_perplexity
 
-from tqdm import tqdm
-from collections import Counter
-import time
-
-PAD_ID = 0
-BOS_ID = 1
-EOS_ID = 2
 VALID_AAS = 'ACDEFGHIKLMNPQRSTVWY' # restrict generation to 20 standard amino acids
 
 def cross_entropy_2way(logits, seq):
+    if seq.numel() < 2:
+        raise ValueError('ATP reconstruction scoring requires at least two residues')
     half_sz = logits.size(-1) // 2
     p_logits = logits[1:,:half_sz]
     n_logits = logits[:-1,half_sz:]
@@ -27,53 +31,52 @@ def cross_entropy_2way(logits, seq):
     n_toks = seq[1:]
 
     ce = [torch.nn.functional.cross_entropy(p_logits, p_toks), torch.nn.functional.cross_entropy(n_logits, n_toks)]
-    ce = np.array([x.numpy(force=True) for x in ce])
-    return ce
+    return torch.stack(ce).mean()
 
 # assume tokenized tensor seq
 def seq_to_ce(seq : torch.Tensor, model, device, ce_fn=cross_entropy_2way):
     idxs = list(range(seq.size(1)))
 
     mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
-    logits = model(seq, attention_mask=mask)
-    ce = ce_fn(logits.squeeze(0), seq.squeeze(0))
+    with torch.inference_mode():
+        logits = model(seq, attention_mask=mask)
+        ce = ce_fn(logits.squeeze(0), seq.squeeze(0))
     return ce
 
-# compute shannon entropy by character frequencies
-def seq_entropy(seq : str, ignore_idxs):
-    idxs = set(ignore_idxs)
-    freqs = {c: 0 for c in VALID_AAS}
-    for i, c in enumerate(seq):
-        if i in idxs: continue
-        if c not in freqs.keys(): continue
-        freqs[c] += 1
-    freqs = np.array(list(freqs.values()), dtype=float)
-    freqs = freqs[freqs != 0]
-    freqs /= np.sum(freqs)
-    return -np.sum(freqs * np.log2(freqs))
-
-
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='./weights/model.pt')
+    parser.add_argument('--weights', type=str, required=True)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
-    parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--tokenizer', type=str, default='./tokenizer-uniref.json')
-    parser.add_argument('--max-steps', type=int, default=50)
-    parser.add_argument('--rep-window', type=int, default=4)
-    parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
-    parser.add_argument('--max-window', type=int, default=-1)
-    parser.add_argument('--config', type=str, default='config-medium')
+    parser.add_argument('--config', type=str, default='config-medlarge.json')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     parser.add_argument('--output', default='./out.tsv')
-    parser.add_argument('--id', action='store_true')
-    args = parser.parse_args()
+    parser.add_argument('--max-samples', type=int, default=0)
+    parser.add_argument('--min-length', type=int, default=100)
+    parser.add_argument('--max-length', type=int, default=1000)
+    parser.add_argument(
+        '--keep-fracs',
+        type=float,
+        nargs='+',
+        default=[0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8],
+    )
+    args = parser.parse_args(argv)
+
+    if args.max_samples < 0:
+        raise ValueError('--max-samples cannot be negative')
+    if args.min_length < 1 or args.max_length < args.min_length:
+        raise ValueError('Invalid sequence-length bounds')
+    if args.model_type == 'atp' and args.min_length < 2:
+        raise ValueError('--min-length must be at least 2 for ATP')
+    if not args.keep_fracs or any(
+        fraction <= 0 or fraction >= 1 for fraction in args.keep_fracs
+    ):
+        raise ValueError('--keep-fracs values must be between 0 and 1')
 
     if args.model_type == 'atp':
         model_class = BidirectionalCausalLM
@@ -93,32 +96,16 @@ def main():
 
     device = torch.device(args.device)
 
-    if device.type == 'cpu':
-        print('falling back to fp32')
-        args.fp16 = False
-
-    configf = f'./{args.config}.json'
-
     # load everything
 
-    # load checkpoint if provided
-    checkpoint = args.weights
-    if checkpoint != '' and os.path.exists(checkpoint):
-        with print_time('loading checkpoint data from ' + checkpoint):
-            states = torch.load(checkpoint, map_location='cpu', weights_only=False)
-            
-            if not args.id: init_step = states['step'] * 8 # TODO: need training batch size, prob don't hardcode
-            else: init_step = 0
-    else:
-        states = None
-        init_step = 0
-
     with print_time('loading model'):
-        model = load_model_compat(model_class, configf, device, states)
-
+        model = load_model_checkpoint(
+            model_class, args.config, device, args.weights
+        )
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file=args.tokenizer)
+        bos_id, eos_id = resolve_terminal_ids(tokenizer)
 
         mask_id = None
         if args.model_type == 'esm':
@@ -128,25 +115,36 @@ def main():
 
         # get valid token IDs; does not work with proper BPE
         # this excludes terminals, which are handled later
-        valid_ids = tokenizer.encode(VALID_AAS).ids
-        invalid_ids = [x for x in range(32) if x not in valid_ids]
+        valid_ids = set(tokenizer.encode(VALID_AAS).ids)
+        invalid_ids = [
+            token_id
+            for token_id in range(model.config.vocab_size)
+            if token_id not in valid_ids
+        ]
 
     with print_time('loading datasets'):
-        dataset = make_gen_from_ext(args.data, init_step)
+        dataset = make_gen_from_ext(args.data)
+
+    sample_fn = make_sample_fn(args.sample, args.p)
 
     # run eval
     
     model.eval()
 
-    keep_fracs = [0.01, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8]
+    keep_fracs = args.keep_fracs
 
-    with print_time('evaluating'), open(args.output, 'w') as outf:
-        outf.write('generated %\tcontiguous\tPPL\tSE\tidx\tseq\n')
+    output_parent = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(output_parent, exist_ok=True)
+
+    with print_time('evaluating'), open(args.output, 'w') as outf, torch.inference_mode():
+        outf.write('generated %\tcontiguous\tfully-visible reconstruction PPL\tAA composition entropy\tidx\tseq\n')
         prev_seq = None
+        evaluated_sequences = 0
         
         for seq, _ in dataset:
             if seq == prev_seq: continue
-            if len(seq) < 100 or len(seq) > 1000: continue
+            if len(seq) < args.min_length or len(seq) > args.max_length: continue
+            if len(seq) > model.config.n_ctx: continue
 
             prev_seq = seq
 
@@ -164,6 +162,10 @@ def main():
                     
                     # make tensors
                     seq = tokenizer.encode(prev_seq).ids
+                    if len(seq) != len(prev_seq):
+                        raise ValueError(
+                            'Completion requires a tokenizer with one token per residue'
+                        )
                     seq = torch.tensor(seq).to(device)
                     seq = seq[None,:]
                     idxs = torch.tensor(keep_idx).to(device)
@@ -174,36 +176,55 @@ def main():
                     for gs in range(gen_steps): # removed tqdm
                         # generate next token
                         gen_kwargs = {'mask_id': mask_id} if args.model_type == 'esm' else {}
+                        if args.model_type == 'atp':
+                            gen_kwargs.update(bos_id=bos_id, eos_id=eos_id)
                         new_token, new_pos = gen_step(
                             model,
                             seq,
                             idxs,
                             device,
                             invalid_ids,
+                            sample_fn=sample_fn,
                             predict_terminals=False,
                             **gen_kwargs,
                         )
-                        if new_token == None:
-                            print('generation failed on step', gs)
-                            print('seq', seq)
-                            print('idxs', idxs)
-                            break
+                        if new_token is None:
+                            raise RuntimeError(
+                                f'Generation stopped after {gs} of {gen_steps} steps'
+                            )
 
                         # update seq and idxs
-                        seq[:,new_pos] = new_token[None,None]
-                        idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
+                        seq, idxs = update_generation_state(
+                            seq, idxs, new_token, new_pos
+                        )
 
-                    seq_str = tokenizer.decode(seq.squeeze().numpy(force=True))
+                    if idxs.numel() != seq.size(1):
+                        raise RuntimeError(
+                            'Generation ended before every hidden position was filled'
+                        )
+
+                    seq_str = decode_token_ids(tokenizer, seq.squeeze(0))
+                    if len(seq_str) != seq.size(1):
+                        raise ValueError(
+                            'Decoded sequence length does not match residue indices'
+                        )
                     print(seq_str)
                     outf.write('{:.2f}\t{}\t{}\t{:.2f}\t{}\t{}\n'.format(
-                        (1-keep_frac)*100,
+                        100 * (len(prev_seq) - keep_sz) / len(prev_seq),
                         contiguous,
-                        2 ** seq_to_ce(seq, model, device, ce_fn),
-                        seq_entropy(seq_str, keep_idx),
+                        cross_entropy_to_perplexity(seq_to_ce(seq, model, device, ce_fn)),
+                        amino_acid_composition_entropy(seq_str, keep_idx),
                         keep_idx,
-                        tokenizer.decode(seq.squeeze().numpy(force=True))
+                        seq_str
                         )
                     )
+
+            evaluated_sequences += 1
+            if args.max_samples and evaluated_sequences >= args.max_samples:
+                break
+
+    if evaluated_sequences == 0:
+        raise ValueError('No sequences satisfied the evaluation filters')
 
 if __name__ == '__main__':
     main()

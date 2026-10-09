@@ -38,33 +38,31 @@ def tsv_gen(file):
             # parse binding site data
             bind_split = bind.split(';')
             for sub_bind in bind_split:
+                sub_bind = sub_bind.strip()
                 # for now, just make pairs for each BINDING instance
-                if sub_bind[:7] == 'BINDING':
+                if sub_bind.startswith('BINDING'):
                     bind_range = sub_bind.split()[-1].split('..')
                     # enforce valid binding site
                     try:
-                        # enforce correct number of elements
-                        assert 1 <= len(bind_range) <= 2
-                        # enforce sequence bounds
-                        assert min(0 < int(x) < len(seq) for x in bind_range)
-                        # enforce valid range
-                        if len(bind_range) == 2:
-                            assert int(bind_range[0]) <= int(bind_range[1])
-                    except:
+                        if not 1 <= len(bind_range) <= 2:
+                            raise ValueError
+                        coordinates = [int(value) for value in bind_range]
+                        if not all(1 <= value <= len(seq) for value in coordinates):
+                            raise ValueError
+                        if len(coordinates) == 2 and coordinates[0] > coordinates[1]:
+                            raise ValueError
+                    except (TypeError, ValueError):
                         continue
-                    # get single position index or range of position indices
-                    if len(bind_range) == 1:
-                        # single -> tensor
-                        bind_idx = torch.tensor([int(bind_range[0])])
-                    else:
-                        # range
-                        bind_idx = range(int(bind_range[0]), int(bind_range[1])+1)
-                        bind_idx = torch.tensor(bind_idx)
+
+                    # UniProt feature coordinates are one-based and inclusive.
+                    start = coordinates[0] - 1
+                    end = coordinates[-1] - 1
+                    bind_idx = torch.arange(start, end + 1)
                     yield seq, bind_idx
 
 # select generator from file extension
 def make_gen_from_ext(file, start=0):
-    ext = file.split('.')[-1]
+    ext = str(file).rsplit('.', 1)[-1].lower()
     if ext in ['fasta', 'fa']:
         return fasta_gen(file, start)
     elif ext == 'tsv':
@@ -163,7 +161,10 @@ class PackedUnirefData(Dataset):
             attn, targets = diag_block_mask(mask_idxs, sep_idxs, self.max_dim)
 
             # convert targets from indices to token ids
-            targets = torch.where(targets >= 0, seq[targets], targets)
+            target_positions = targets >= 0
+            token_targets = torch.full_like(targets, -100)
+            token_targets[target_positions] = seq[targets[target_positions]]
+            targets = token_targets
 
         else:
             # make target sequence that ignores all non-masked positions
@@ -188,7 +189,17 @@ class PackedUnirefData(Dataset):
 
 # generation dataset
 class ProteinBindingOnlyData(Dataset):
-    def __init__(self, file, tokenizer, max_dim=512, max_samples=15, keep_len=False):
+    def __init__(
+        self,
+        file,
+        tokenizer,
+        max_dim=512,
+        max_samples=15,
+        keep_len=False,
+        motif_dropout=0.0,
+    ):
+        if not 0 <= motif_dropout <= 1:
+            raise ValueError('motif_dropout must be between 0 and 1')
         self.max_dim = max_dim
         self.seqs = []
         self.idxs = []
@@ -199,22 +210,49 @@ class ProteinBindingOnlyData(Dataset):
         # fetch all
         sample_count = 0
         for seq, idx in gen:
+            raw_length = len(seq)
             # tokenize
             seq = tokenizer.encode(seq).ids
-
-            # if keeping full sequence length, enforce bounds now
-            if keep_len: seq = seq[:max_dim]
+            if len(seq) != raw_length:
+                raise ValueError(
+                    'Generation requires a tokenizer with one token per residue'
+                )
 
             # generate artificial binding site if necessary
-            if idx is None: idx = rand_mask_start(len(seq), self.max_dim, just_binding=True)
-            # otherwise, adjust for extra token then randomly drop indices
-            else: idx = apply_dropout(idx)
-            
+            if idx is None:
+                if keep_len:
+                    seq = seq[:max_dim]
+                idx = torch.as_tensor(
+                    rand_mask_start(len(seq), self.max_dim, just_binding=True),
+                    dtype=torch.long,
+                )
+            else:
+                idx = torch.as_tensor(idx, dtype=torch.long)
+                if motif_dropout > 0:
+                    idx = apply_dropout(idx, p_drop=motif_dropout)
+                idx = torch.unique(idx, sorted=True)
+                if idx.numel() == 0 or idx[0] < 0 or idx[-1] >= len(seq):
+                    raise ValueError('Binding-site indices are outside the sequence')
+
+                if keep_len and len(seq) > max_dim:
+                    motif_span = int(idx[-1] - idx[0] + 1)
+                    if motif_span > max_dim:
+                        continue
+                    earliest_start = max(0, int(idx[-1]) - max_dim + 1)
+                    latest_start = min(int(idx[0]), len(seq) - max_dim)
+                    crop_start = (earliest_start + latest_start) // 2
+                    seq = seq[crop_start:crop_start + max_dim]
+                    idx = idx - crop_start
+
             if not keep_len:
+                motif_span = int(idx[-1] - idx[0] + 1)
+                if motif_span > max_dim:
+                    continue
                 # store smallest possible subsequence
-                seq = seq[idx[0] : idx[-1] + 1]
-                seq = seq[:max_dim]
-                idx -= idx[0]
+                start = int(idx[0])
+                end = int(idx[-1]) + 1
+                seq = seq[start:end]
+                idx = idx - start
 
             # store
             self.seqs.append(torch.tensor(seq))
