@@ -53,7 +53,7 @@ def main(argv=None):
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--tokenizer', type=str, default='./tokenizer-uniref.json')
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
-    parser.add_argument('--config', type=str, default='./config-medium.json')
+    parser.add_argument('--config', type=str, default='config-medlarge.json')
     parser.add_argument('--model_type', choices=['atp', 'esm'], default='atp')
     parser.add_argument('--output', default='./out.tsv')
     parser.add_argument('--max-samples', type=int, default=0)
@@ -102,7 +102,6 @@ def main(argv=None):
         model = load_model_checkpoint(
             model_class, args.config, device, args.weights
         )
-
 
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file=args.tokenizer)

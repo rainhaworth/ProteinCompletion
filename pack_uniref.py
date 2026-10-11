@@ -6,8 +6,8 @@ import bisect
 import numpy as np
 from tokenizers import Tokenizer, models, pre_tokenizers
 
-f_in = './data/uniref50-trimmed.fasta'
-f_out = './data/uniref50-packed.bin'
+f_in = './uniref/uniref50.fasta'
+f_out = './uniref/uniref50-full-packed.bin'
 max_cap = 1024
 
 random.seed(42)
@@ -21,11 +21,11 @@ PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
 SEP_ID = 3
-TOK_START = 4
-tokens = ['<pad>', '<bos>', '<eos>', '<sep>'] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+MASK_ID = 4
+TOK_START = 5
+tokens = ['<pad>', '<bos>', '<eos>', '<sep>', '<mask>'] + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 vocab = {token: i for i, token in enumerate(tokens)}
 vocab['<unk>'] = len(vocab)
-vocab['<mask>'] = len(vocab) # oops forgot about this; mask ID = 31
 tokenizer = Tokenizer(models.WordLevel(vocab, '<unk>'))
 tokenizer.pre_tokenizer = pre_tokenizers.Split('', 'isolated') # character-level
 tokenizer.save('tokenizer-uniref.json')
@@ -42,7 +42,7 @@ for record in tqdm(SeqIO.parse(f_in, 'fasta')):
     if len(seq) > max_cap:
         start = random.randint(0, len(seq)-max_cap)
         seq = seq[start:start+max_cap]
-    ids = [ord(x) - ord('A') + TOK_START for x in seq]
+    ids = bytearray([ord(x) - ord('A') + TOK_START for x in seq])
     seqs.append(ids)
 
 # sort by length, descending
@@ -69,7 +69,7 @@ for seq in tqdm(seqs):
         # add to bin or make new
         if best_i != len(open_bins):
             # add SEP token
-            new_seq = open_bins[best_i][0] + [SEP_ID] + seq
+            new_seq = open_bins[best_i][0] + bytearray([SEP_ID]) + seq
             new_gap = max_cap - len(new_seq)
 
             open_bins.pop(best_i)
@@ -97,7 +97,7 @@ print('writing')
 arr = np.memmap(f_out, mode='w+', shape=(len(closed_bins),max_cap))
 for i, seq in tqdm(enumerate(closed_bins)):
     # pad
-    arr[i,:] = seq + [PAD_ID] * (max_cap - len(seq))
+    arr[i,:] = seq + bytearray([PAD_ID] * (max_cap - len(seq)))
 arr.flush()
 
 
