@@ -78,5 +78,42 @@ python -m StructureEvaluation.pilot_generation_manifest path/to/panel.json
 This writes `data/pilot_generation_manifest.json` with two fixed generation
 seeds per pilot protein. Each row records the full original sequence, exact
 zero-based visible positions, attempt number, and seed. Both sequence models
-can use the same rows. The manifest is provisional and is not yet consumed by
-`eval-completion.py` or approved as a test set.
+can use the same rows. The manifest is provisional and is not an approved test
+set.
+
+`run_pilot_generation` consumes the manifest directly so fragmented motifs are
+not split into separate examples by the legacy binding-site TSV reader. It also
+recreates the current UniRef tokenizer layout, verifies the checkpoint hash,
+checks motif preservation, and writes each completed attempt atomically.
+
+The 80,000-step checkpoints received on 2026-10-10 have these SHA-256 hashes:
+
+- ESM: `d507f9abf5f0cb87265bc321715c7921146a31bef276c307c816b42fa70fcfb5`
+- ATP: `656b77646ba607892f6fc4685d46b70ab3c0db48089a55851f9d565d512f15a3`
+
+Run one matched smoke case on a GPU before launching all six rows:
+
+```bash
+python -m StructureEvaluation.run_pilot_generation \
+  --manifest data/pilot_generation_manifest.json \
+  --weights /path/to/train-esm-step80000.pt \
+  --checkpoint-sha256 d507f9abf5f0cb87265bc321715c7921146a31bef276c307c816b42fa70fcfb5 \
+  --model-type esm \
+  --accession A0A0H2XJL0 \
+  --attempt-index 0 \
+  --output results/pilot-esm-smoke.json
+
+python -m StructureEvaluation.run_pilot_generation \
+  --manifest data/pilot_generation_manifest.json \
+  --weights /path/to/train-atp-step80000.pt \
+  --checkpoint-sha256 656b77646ba607892f6fc4685d46b70ab3c0db48089a55851f9d565d512f15a3 \
+  --model-type atp \
+  --accession A0A0H2XJL0 \
+  --attempt-index 0 \
+  --output results/pilot-atp-smoke.json
+```
+
+If both records are complete and preserve their motifs, omit the accession and
+attempt filters to generate all six attempts for each model. The runner defaults
+to nucleus sampling with `p=0.95`, the medium-large model configuration, and the
+seed recorded in each manifest row.
