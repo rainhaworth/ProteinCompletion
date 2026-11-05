@@ -42,13 +42,65 @@ def test_prepare_case_preserves_full_esm_context_and_crops_atp_to_motif_span():
     atp_sequence, atp_visible, atp_original, atp_motif = prepare_case(
         row, tokenizer, "atp", torch.device("cpu")
     )
+    fixed_atp_sequence, fixed_atp_visible, _, fixed_atp_motif = prepare_case(
+        row,
+        tokenizer,
+        "atp",
+        torch.device("cpu"),
+        atp_length_mode="fixed",
+    )
 
     assert esm_sequence.shape == (1, 6)
     assert esm_visible.tolist() == [1, 4]
     assert atp_sequence.shape == (1, 4)
     assert atp_visible.tolist() == [0, 3]
+    assert fixed_atp_sequence.shape == (1, 6)
+    assert fixed_atp_visible.tolist() == [1, 4]
     assert esm_original.tolist() == atp_original.tolist() == [1, 4]
-    assert esm_motif.tolist() == atp_motif.tolist()
+    assert esm_motif.tolist() == atp_motif.tolist() == fixed_atp_motif.tolist()
+
+
+def test_fixed_length_atp_fills_manifest_window_without_predicting_terminals():
+    tokenizer = make_uniref_tokenizer()
+    row = example_row()
+    model = SimpleNamespace(config=SimpleNamespace(vocab_size=32, n_ctx=16))
+    terminal_flags = []
+
+    def reveal_original_token(
+        model,
+        sequence,
+        visible,
+        device,
+        invalid_ids,
+        sample_fn,
+        bos_id,
+        eos_id,
+        predict_terminals,
+    ):
+        terminal_flags.append(predict_terminals)
+        hidden = sorted(set(range(sequence.size(1))) - set(visible.tolist()))
+        if not hidden:
+            return None, None
+        position = hidden[0]
+        return sequence[0, position], position
+
+    result = generate_case(
+        model,
+        row,
+        "atp",
+        tokenizer,
+        torch.device("cpu"),
+        sample_fn=lambda values: (torch.tensor(0), torch.tensor(0)),
+        generation_step=reveal_original_token,
+        atp_length_mode="fixed",
+    )
+
+    assert result["complete"] is True
+    assert result["length_mode"] == "fixed"
+    assert result["sequence"] == row["original_sequence"]
+    assert result["generated_length"] == result["original_length"] == 6
+    assert result["generated_visible_positions_0based"] == [1, 4]
+    assert terminal_flags and not any(terminal_flags)
 
 
 def test_select_rows_rejects_bad_or_empty_filters():

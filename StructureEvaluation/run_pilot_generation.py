@@ -67,7 +67,13 @@ def select_rows(manifest, accession=None, attempt_index=None):
     return rows
 
 
-def prepare_case(row, tokenizer, model_type, device):
+def prepare_case(
+    row,
+    tokenizer,
+    model_type,
+    device,
+    atp_length_mode="free",
+):
     sequence = row["original_sequence"]
     if not sequence or any(residue not in VALID_AAS for residue in sequence):
         raise ValueError(f"{row.get('accession', 'Pilot row')} has an invalid sequence")
@@ -85,7 +91,9 @@ def prepare_case(row, tokenizer, model_type, device):
         raise ValueError("Pilot row must contain at least one hidden position")
 
     original_visible = visible.clone()
-    if model_type == "atp":
+    if atp_length_mode not in {"free", "fixed"}:
+        raise ValueError("ATP length mode must be 'free' or 'fixed'")
+    if model_type == "atp" and atp_length_mode == "free":
         crop_start = int(visible[0])
         crop_end = int(visible[-1]) + 1
         token_ids = token_ids[crop_start:crop_end]
@@ -105,9 +113,14 @@ def generate_case(
     sample_fn,
     max_steps=None,
     generation_step=None,
+    atp_length_mode="free",
 ):
     sequence, visible, original_visible, motif_tokens = prepare_case(
-        row, tokenizer, model_type, device
+        row,
+        tokenizer,
+        model_type,
+        device,
+        atp_length_mode=atp_length_mode,
     )
     motif_indices = visible.clone()
     bos_id, eos_id = resolve_terminal_ids(tokenizer)
@@ -132,7 +145,11 @@ def generate_case(
                 invalid_ids,
                 sample_fn=sample_fn,
                 **(
-                    {"bos_id": bos_id, "eos_id": eos_id}
+                    {
+                        "bos_id": bos_id,
+                        "eos_id": eos_id,
+                        "predict_terminals": atp_length_mode == "free",
+                    }
                     if model_type == "atp"
                     else {"mask_id": mask_id}
                 ),
@@ -154,7 +171,11 @@ def generate_case(
         and sequence[0, 0].item() == bos_id
         and sequence[0, -1].item() == eos_id
     )
-    complete = all_visible if model_type == "esm" else all_visible and has_terminals
+    complete = (
+        all_visible
+        if model_type == "esm" or atp_length_mode == "fixed"
+        else all_visible and has_terminals
+    )
     generated_sequence, output_motif, output_visible = prepare_generation_output(
         sequence,
         visible,
@@ -179,6 +200,7 @@ def generate_case(
         "attempt_index": row["attempt_index"],
         "generation_seed": row["generation_seed"],
         "model_type": model_type,
+        "length_mode": atp_length_mode if model_type == "atp" else "fixed",
         "complete": complete,
         "original_length": len(row["original_sequence"]),
         "generated_length": len(generated_sequence),
@@ -208,6 +230,16 @@ def build_parser():
     parser.add_argument("--p", type=float, default=0.95)
     parser.add_argument("--accession")
     parser.add_argument("--attempt-index", type=int)
+    parser.add_argument(
+        "--atp-length-mode",
+        choices=["free", "fixed"],
+        default="free",
+        help=(
+            "For ATP, either generate sequence terminals and length (free) or "
+            "fill the manifest's fixed sequence length without terminal prediction "
+            "(fixed). ESM generation is always fixed-length."
+        ),
+    )
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--overwrite", action="store_true")
     return parser
@@ -274,6 +306,7 @@ def main(argv=None):
             device,
             sample_fn,
             max_steps=args.max_steps,
+            atp_length_mode=args.atp_length_mode,
         )
         result.update(
             {

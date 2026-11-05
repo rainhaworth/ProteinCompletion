@@ -108,6 +108,7 @@ python -m StructureEvaluation.run_pilot_generation \
   --weights /path/to/train-atp-step80000.pt \
   --checkpoint-sha256 656b77646ba607892f6fc4685d46b70ab3c0db48089a55851f9d565d512f15a3 \
   --model-type atp \
+  --atp-length-mode fixed \
   --accession A0A0H2XJL0 \
   --attempt-index 0 \
   --output results/pilot-atp-smoke.json
@@ -117,3 +118,10 @@ If both records are complete and preserve their motifs, omit the accession and
 attempt filters to generate all six attempts for each model. The runner defaults
 to nucleus sampling with `p=0.95`, the medium-large model configuration, and the
 seed recorded in each manifest row.
+
+The matched ATP-versus-ESM comparison should use `--atp-length-mode fixed`, so
+both models receive the same target sequence length. ATP's default `free` mode
+instead crops to the motif span and asks the model to generate both terminal
+tokens and the sequence length. That is a separate variable-length generation
+task and should be reported separately rather than compared directly with the
+fixed-length ESM completion.
