@@ -79,6 +79,11 @@ def apply_dropout(idxs, p_drop=0.2):
     idxs_new = idxs[torch.randperm(len(idxs))]
     return torch.sort(idxs_new[:elems_to_keep]).values
 
+# deterministic random sampling order; python list works as sampler
+def fixed_perm_sampler(n, seed):
+    gen = torch.Generator().manual_seed(seed)
+    return torch.randperm(n, generator=gen).tolist()
+
 # training dataset
 class PackedUnirefData(Dataset):
     def __init__(self, file, tokenizer=None, max_dim=512, max_samples=None, p_drop=None, start_seq_idx=None, model_type='atp', flip_frac=False):
