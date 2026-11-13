@@ -5,6 +5,7 @@ import torch
 from tokenizers import Tokenizer
 import random
 import json
+import math
 
 from .config import BaseConfig
 

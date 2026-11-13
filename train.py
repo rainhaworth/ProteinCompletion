@@ -77,8 +77,8 @@ def main():
         start = step * args.bsz
         if start >= len(dataset): 
             epoch_steps = np.ceil(len(dataset) / args.bsz)
-            epochs = step // full_pass_steps
-            start = (step - epochs * full_pass_steps) * args.bsz
+            epochs = step // epoch_steps
+            start = (step - epochs * epoch_steps) * args.bsz
         sampler = sampler[start:]
         dataloader = torch.utils.data.DataLoader(dataset, num_workers=2, pin_memory=True, batch_size=args.bsz, sampler=sampler)
         return dataset, dataloader
@@ -155,7 +155,6 @@ def main():
                 print('saved to', save_path)
             step_count += 1
             t0 = time.time()
-        if batches > 0: print('loss: {:.5f}'.format(total_loss / batches))
 
         # if we finish an epoch, reset the dataloader
         perm_seed = np.random.randint(np.iinfo(int).max)
