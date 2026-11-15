@@ -133,9 +133,9 @@ def get_scheduler(optimizer, num_warmup_steps, num_training_steps, num_cycles=0.
 
 # load all other training state data from config
 def load_train_config(model, warmup_steps, train_steps, states=None):
-    # initialize
-    # TODO: we can probably just use the default AdamW parameters, fused=True is good though; see Marek et al. 2025 "Small Batch Size..."
-    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4, betas=(0.9, 0.98), weight_decay=0.1, fused=True)
+    # default AdamW parameters should work at bsz=16
+    # see Marek et al. 2025, "Small Batch Size Training for Language Models: When Vanilla SGD Works, and Why Gradient Accumulation Is Wasteful"
+    optimizer = torch.optim.AdamW(model.parameters(), fused=True)
     lr_scheduler = get_scheduler(optimizer, warmup_steps, train_steps)
 
     # load all provided states
