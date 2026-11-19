@@ -19,10 +19,10 @@ class SwiGLU(torch.nn.Module):
 def build_rope_cache(seq_len, head_dim, base=10000.0, device=None, dtype=None):
     inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim))
     t = torch.arange(seq_len, device=device, dtype=torch.float32)
-    freqs = torch.outer(t, inv_freq)          # (seq_len, head_dim/2)
+    freqs = torch.outer(t, inv_freq) # (seq_len, head_dim/2)
     cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)
     sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)
-    return cos.to(dtype), sin.to(dtype)        # (seq_len, head_dim)
+    return cos.to(dtype), sin.to(dtype) # (seq_len, head_dim)
 
 def rotate_half(x):
     x1, x2 = x.chunk(2, dim=-1)
@@ -42,10 +42,13 @@ class Attention(torch.nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         
         self.qkv_proj = torch.nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=False)
+        self.q_ln = torch.nn.LayerNorm(self.hidden_size, bias=False)
+        self.k_ln = torch.nn.LayerNorm(self.hidden_size, bias=False)
+
         self.o_proj = torch.nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
     def forward(self,
-            hidden_states,
+            hidden_states : torch.Tensor,
             attention_mask=None,
             use_cache=False,
             output_attentions=False,):
@@ -56,10 +59,16 @@ class Attention(torch.nn.Module):
         qkv = self.qkv_proj(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
+        # QK-normalization
+        q = self.q_ln(q).to(q.dtype)
+        k = self.k_ln(k).to(k.dtype)
+
+        # reorder for SDPA
         q = q.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
 
+        # RoPE
         cos, sin = build_rope_cache(L, self.head_dim, device=x.device, dtype=x.dtype)
         cos, sin = cos[None, None], sin[None, None]  # (1, 1, L, head_dim)
         q = apply_rope(q, cos, sin)
@@ -176,8 +185,7 @@ class BaseModel(torch.nn.Module):
         # create broadcastable + functional attention mask
         if attention_mask is not None:
             attention_mask = attention_mask[:, None, :, :]
-            #attention_mask = attention_mask.to(dtype=torch.float16)  # fp16 compatibility
-            attention_mask = (1.0 - attention_mask) * -10000.0
+            attention_mask = attention_mask.bool() # torch SDPA supports bool masks
 
         hidden_states = inputs_embeds
         hidden_states = self.drop(hidden_states)

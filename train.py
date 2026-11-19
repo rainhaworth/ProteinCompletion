@@ -97,7 +97,7 @@ def main():
     save_pre = 'train-' + args.model_type
     if args.flip: save_pre += '-flip'
 
-    writer = SummaryWriter()
+    writer = SummaryWriter('./runs/' + time.strftime('%b_%d_%H_%M') + '_' + args.model_type)
 
     model.compile()
     model.train()
@@ -109,7 +109,7 @@ def main():
     step_count = init_step + 1
     save_every = args.save_every
     print_every = 1000
-    flush_every = 50
+    flush_every = 100
     while True:
         t0 = time.time()
         for seqs, targets, attns in train_dataloader:
@@ -121,21 +121,31 @@ def main():
             else:
                 attns = attns.to(device)
 
+            t1 = time.time()
+
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16): # using ampere gpu; otherwise set to fp16 and use gradient scaling
                 logits = model(seqs, attention_mask=attns)
                 loss = loss_fn(logits.view(-1, model.config.vocab_size), targets.view(-1))
             
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            total_grad = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-            
+
+            t2 = time.time()
             # write loss to tensorboard every step, print periodically
             writer.add_scalar('loss', loss.item(), step_count)
-            writer.add_scalar('step time', time.time() - t0, step_count)
+            writer.add_scalar('step time', t2 - t0, step_count)
+            writer.add_scalar('model time', t2 - t1, step_count)
 
-            if step_count % flush_every == 0: writer.flush()
+            if step_count % flush_every == 0:
+                weight_norm = torch.sqrt(
+                    sum(p.detach().float().pow(2).sum() for p in model.parameters())
+                )
+                writer.add_scalar('weight norm', weight_norm.item(), step_count)
+                writer.add_scalar('grad norm', total_grad.item(), step_count)
+                writer.flush()
 
             if step_count % print_every == 0: print('step {} loss: {:.5f}'.format(step_count, loss.item()))
 

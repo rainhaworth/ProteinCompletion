@@ -50,7 +50,8 @@ def init_weights(module, config):
         if module.padding_idx is not None:
             module.weight.data[module.padding_idx].zero_()
     elif isinstance(module, torch.nn.LayerNorm):
-        module.bias.data.zero_()
+        if module.bias is not None:
+            module.bias.data.zero_()
         module.weight.data.fill_(1.0)
 
 # model loading function, ensuring compatibility with old checkpoints
@@ -122,20 +123,22 @@ def load_model_checkpoint(model_class, config_file, device, checkpoint):
 
 # LR scheduler from https://github.com/huggingface/transformers/blob/v5.22.2/src/transformers/optimization.py
 # we don't use anything else from transformers so this avoids the import entirely
+# modified to decay to 10% max LR, following ESM3, and to stay at 10% if we exceed num_training_steps
 def get_scheduler(optimizer, num_warmup_steps, num_training_steps, num_cycles=0.5, last_epoch=-1):
-    def lr_lambda(current_step: int):
+    def lr_lambda(current_step):
         if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
+            return current_step / max(1, num_warmup_steps)
+        progress = min(1.0, (current_step - num_warmup_steps) / max(1, num_training_steps - num_warmup_steps))
+        return max(0.1, 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress)))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 # load all other training state data from config
 def load_train_config(model, warmup_steps, train_steps, states=None):
     # default AdamW parameters should work at bsz=16
-    # see Marek et al. 2025, "Small Batch Size Training for Language Models: When Vanilla SGD Works, and Why Gradient Accumulation Is Wasteful"
-    optimizer = torch.optim.AdamW(model.parameters(), fused=True)
+        # see Marek et al. 2025, "Small Batch Size Training for Language Models: When Vanilla SGD Works, and Why Gradient Accumulation Is Wasteful"
+        # needs lower LR in this setting (1e-3 -> NaN loss)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4, fused=True)
     lr_scheduler = get_scheduler(optimizer, warmup_steps, train_steps)
 
     # load all provided states
